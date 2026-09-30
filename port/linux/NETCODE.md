@@ -47,7 +47,12 @@ with ideas from VALORANT's netcode articles, keeping the 30 Hz tick:
   of a world unit a tick more for where they are; and no higher above
   where the host last had them on the ground than a jump takes them (as
   fast up as a jump or a run, the legs drawn up, and a world unit more)
-  and a throw its ticks gave them. What the host's ticks sent its copy is
+  and a throw its ticks gave them, and in the air no higher than a thing
+  thrown up at that speed falls to since (the ticks since the host's copy
+  left the ground, less the client's round trip, half a second at most,
+  and jitter): past it, the
+  host's copy falls as its own ticks have it, so no one hovers, walks on
+  air or comes down slowly. What the host's ticks sent its copy is
   its speed less as much as the velocity it took of the client was faster
   than the player goes of their own (and up, what its tick added but a
   jump's), so a client that says it goes faster (a copy said to hover and
@@ -84,7 +89,19 @@ each datagram, sends damage and pickups only to the machines they concern,
 stamps a hit with the host's tick the client had heard of, and checks hits
 and a client's own player's moves more closely; version 7 sends with a
 killing blow its killer's score after it, and with a body's state that it
-is dead.
+is dead; version 8 is the first whose clients play by the host's rules
+(below), so a build without them joins no host of it.
+
+A client plays by its host's rules: in another's game (searching for it,
+in its lobby, or playing it) the developer console, the telnet console
+and the cheat buttons run only commands that change nothing of the game
+(what the machine shows and how its controls feel: `hs_compile_and_evaluate`),
+and each frame and tick the game's cheats, speed, autoaim, magnetism and
+rider ejection are put back to the host's, and what it draws of the world
+to what everyone's draws (no wireframe, debug drawing mode, environment
+left out, fog, grass or water off), as set before joining too
+(`cheats_network_client_enforce`); its camera stays the player's own
+(no flying or following camera). The host keeps its own.
 
 ## Joining a game in progress
 
@@ -203,8 +220,15 @@ a pregame keep-alive every five seconds from the host
    blend distance; its velocity no faster, without the tenth, so that the
    client's word does not raise it, so a vehicle falls no faster than
    that and a tick's gravity: a long fall's last moves are the host's; a
-   teleporter falls back to the tolerance). The host sends the client its own vehicle
-   every third tick, with the client's tick it took the vehicle at
+   teleporter falls back to the tolerance); a vehicle that does not fly,
+   float or stay (not a Banshee, a boat or a turret), in the air, no
+   higher above where it left the ground than a thing thrown up as fast
+   as it went up then, and a tenth of a world unit a tick, falls to since
+   (less the client's round trip, half a second at most, and jitter), with
+   2 world units more (as a player on foot); a copy at rest that the
+   client's word moves wakes, so that it falls and counts its time in the
+   air. The host sends the client its own
+   vehicle every third tick, with the client's tick it took the vehicle at
    (`_distributed_object_predicted_bit` and a 16-bit time in the object's
    state); the client compares that with where it had the vehicle at that
    tick, and past 4 world units moves it by the difference, as it does
