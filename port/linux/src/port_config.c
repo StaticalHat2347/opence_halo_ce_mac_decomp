@@ -174,6 +174,7 @@ static const struct config_setting config_settings[] =
 		"How far the view turns up and down for the mouse's movement; 0 for the\n"
 		"same as input.mouse_sensitivity." },
 
+
 	/* the keyboard and mouse's own controls (port/linux/src/xinput_sdl.c) */
 	{ "controls.move_forward", _config_string, "\"W\"", "HALO_KEY_MOVE_FORWARD", _environment_value, _platform_all,
 		"The keyboard and mouse's controls, which Settings > Controls Setup\n"
@@ -222,6 +223,15 @@ static const struct config_setting config_settings[] =
 		"A map to start at start-up, after init.txt: a campaign level's name\n"
 		"(\"a10\", \"b30\"), a multiplayer map's (\"bloodgulch\"), or a scenario\n"
 		"path (\"levels\\\\b30\\\\b30\"); empty for the menu." },
+
+	{ "game.console_log", _config_string, "\"important\"", "HALO_CONSOLE_LOG", _environment_value, _platform_all,
+		"What the game's console shows on screen of what it logs: \"important\"\n"
+		"(bans, players dropped for cheating, what refuses a command, and the\n"
+		"asserts that stop the game), \"all\" (every line, the game's own\n"
+		"chatter too), or \"none\" (the asserts that stop the game only). What\n"
+		"a command prints shows whatever this is, and debug.txt has every line." },
+
+
 	{ "game.language", _config_string, "\"\"", "HALO_LANGUAGE", _environment_value, _platform_all,
 		"The language the game asks the Xbox for: \"ja\", \"de\", \"fr\", \"es\" or \"it\";\n"
 		"empty for English. The game data decides what is translated." },

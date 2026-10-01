@@ -14091,6 +14091,7 @@ static boolean hs_expression_changes_no_game(
 static boolean hs_compile_and_evaluate_command(
 	char const *expression);
 
+
 /* port: the text after the host's command `word` ("ban", "kick") that an
 expression starts with (spaces and an opening parenthesis before it, in
 either case, then a space or the end), else NULL */
@@ -14113,6 +14114,8 @@ static char const *hs_host_player_command(
 	text += index;
 	return *text == ' ' || *text == '\t' || *text == 0 ? text : NULL;
 }
+
+
 
 /* port: a command someone typed (the console, the telnet console, a cheat
 button, init.txt): what it logs is its answer, shown whatever
