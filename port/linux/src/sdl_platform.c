@@ -40,6 +40,16 @@ static struct platform_ui_pointer ui_pointer;
 static float ui_pointer_wheel;
 #endif
 static pthread_mutex_t input_lock = PTHREAD_MUTEX_INITIALIZER;
+/* the multiplayer scoreboard is open (platform_scoreboard_scroll): the wheel
+and Page Up/Down scroll it, and the wheel switches no weapon; how far they
+have moved it since the game last asked (notches down, pages down). Open
+until the game stops saying so for SCOREBOARD_OPEN_MS (a game that ends with
+it open never says it closed). */
+#define SCOREBOARD_OPEN_MS 250
+static Uint64 scoreboard_open_until_ms;
+static float scoreboard_wheel;
+static long scoreboard_notches;
+static long scoreboard_pages;
 
 /* debug keyboard queue */
 #define KEYSTROKE_QUEUE_SIZE 64
@@ -742,10 +752,33 @@ static void platform_show_pending_message(void)
 
 /* ---------- events */
 
+
 #ifdef HALO_MACOS
 /* whether Command is held, from the key events (Command-W's close) */
 static BOOL platform_command_held;
 #endif
+
+void platform_scoreboard_scroll(int open, long *notches, long *pages)
+{
+	Uint64 now = SDL_GetTicks();
+
+	pthread_mutex_lock(&input_lock);
+	if (!open || now >= scoreboard_open_until_ms)
+	{
+		scoreboard_wheel = 0.0f;
+		scoreboard_notches = 0;
+		scoreboard_pages = 0;
+	}
+	scoreboard_open_until_ms = open ? now + SCOREBOARD_OPEN_MS : 0;
+	if (notches)
+		*notches = scoreboard_notches;
+	if (pages)
+		*pages = scoreboard_pages;
+	scoreboard_notches = 0;
+	scoreboard_pages = 0;
+	pthread_mutex_unlock(&input_lock);
+}
+
 
 void platform_pump_events(void)
 {
@@ -844,6 +877,13 @@ void platform_pump_events(void)
 				}
 				queue_keystroke(&event.key);
 			}
+
+			if (SDL_GetTicks() < scoreboard_open_until_ms && event.key.down &&
+				(event.key.scancode == SDL_SCANCODE_PAGEUP || event.key.scancode == SDL_SCANCODE_PAGEDOWN))
+			{
+				scoreboard_pages += event.key.scancode == SDL_SCANCODE_PAGEDOWN ? 1 : -1;
+			}
+
 			/* F12 releases or recaptures the mouse */
 			if (event.key.down && !event.key.repeat && action == SDL_SCANCODE_F12)
 			{
@@ -913,6 +953,22 @@ void platform_pump_events(void)
 				input_state.mouse_buttons[event.button.button] = event.button.down;
 			break;
 		case SDL_EVENT_MOUSE_WHEEL:
+			if (SDL_GetTicks() < scoreboard_open_until_ms)
+			{
+				/* whole notches, up (away) scrolling up */
+				scoreboard_wheel -= event.wheel.y;
+				while (scoreboard_wheel >= 1.0f)
+				{
+					scoreboard_notches++;
+					scoreboard_wheel -= 1.0f;
+				}
+				while (scoreboard_wheel <= -1.0f)
+				{
+					scoreboard_notches--;
+					scoreboard_wheel += 1.0f;
+				}
+				break;
+			}
 #ifndef HALO_ANDROID
 			if (input_state.ui_pointer)
 			{
