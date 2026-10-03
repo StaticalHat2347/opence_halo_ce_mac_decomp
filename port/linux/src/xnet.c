@@ -414,6 +414,7 @@ static int remote_searcher_targets(unsigned long *targets, int maximum_count)
 	}
 	pthread_mutex_unlock(&remote_searchers_lock);
 	return count;
+}
 
 /* the local port the game's socket is bound to (network byte order), or 0
 if it is not yet */
