@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .android_build import (GUEST_ABI_FLAGS as ANDROID_ABI_FLAGS, GUEST_CODE_FLAGS, MUSL_URL, MUSL_VERSION, SDL_TAG,
-                            SDL_URL, VARIADIC_PROTOTYPE_FILES, KCP_DIR, TOML_DIR, _musl_sources, _quote)
+                            SDL_URL, VARIADIC_PROTOTYPE_FILES, EXPAT_DIR, KCP_DIR, TOML_DIR, _musl_sources, _quote)
 from .linux_build import (MINIUPNPC_DEFINES, MINIUPNPC_DIR, MUSL_MATH_DIR, XDK_INCLUDE, compile_launcher,
                           game_defines_and_includes, game_sources, miniupnpc_sources, musl_math_sources,
                           xdk_headers)
@@ -449,7 +449,7 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         guest_abi, guest_code, "-std=gnu11", "-D_GNU_SOURCE", "-DHALO_LINUX_PLATFORM_LAYER", "-w",
         f"-include {prefix_header}", f"-include {platform_semantics_header}",
         f"-I{LINUX_DIR}/src", f"-I{LINUX_DIR}/include", runtime_dirs,
-        f"-I{TOML_DIR}", f"-I{KCP_DIR}", "-Isource -Isource/cseries",
+        f"-I{TOML_DIR}", f"-I{EXPAT_DIR}", f"-I{KCP_DIR}", "-Isource -Isource/cseries",
         f"-I{SDL_DIR}/include", f"-I{KHRONOS_DIR}", *libc_includes, f"-idirafter {XDK_INCLUDE}",
     ])
     # replaced by the guest runtime (memory_watch.c) or not part of the
@@ -459,6 +459,9 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         if source.name.startswith("posix_") or source.name in guest_host_only:
             continue
         objects.append(guest_object(source, platform_cflags))
+    # the menus' XML parser
+    for name in ("xmlparse.c", "xmlrole.c", "xmltok.c"):
+        objects.append(guest_object(EXPAT_DIR / name, platform_cflags))
     objects.append(guest_object(TOML_DIR / "tomlc17.c", platform_cflags))
     objects.append(guest_object(KCP_DIR / "ikcp.c", platform_cflags))
     musl_math_cflags = " ".join([

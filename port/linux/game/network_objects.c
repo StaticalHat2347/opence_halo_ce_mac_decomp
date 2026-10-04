@@ -2487,8 +2487,8 @@ void network_objects_new_game(
 		objects_host_machines[machine_index].time = NONE;
 	csmemset(objects_host_vehicle_predictions, 0, sizeof(objects_host_vehicle_predictions));
 	for (index = 0; index < MAXIMUM_TRACKED_PLAYERS; index++)
+	{
 		objects_host_vehicle_predictions[index].accepted_vehicle_index = NONE;
-
 		objects_host_vehicle_predictions[index].ground_vehicle_index = NONE;
 		objects_host_vehicle_predictions[index].rest_vehicle_index = NONE;
 	}
