@@ -75,12 +75,11 @@ objects, noncollideable objects, lights) */
 #define HALO_PORT_MAXIMUM_CACHED_OBJECT_RENDER_STATES 1024 /* (256) */
 /* objects one explosion can damage */
 #define HALO_PORT_MAXIMUM_AREA_OF_EFFECT_OBJECTS 256 /* (64) */
-/* object references shared by all script object lists */
-#define HALO_PORT_MAXIMUM_LISTED_OBJECTS_PER_MAP 1024 /* (128) */
-/* widgets (light volumes, antennas, flags, glows, lightning), each made with
-its object and kept for its life: an assault rifle's flashlight beam, held or
-dropped, and a plasma bolt's light volume; a full pool draws the object
-without its widget */
+/* script object lists and their shared object references */
+#define HALO_PORT_MAXIMUM_OBJECT_LISTS_PER_MAP 1024 /* (48) */
+#define HALO_PORT_MAXIMUM_LISTED_OBJECTS_PER_MAP 8192 /* (128) */
+
+/* widgets and light volumes for large multiplayer games */
 #define HALO_PORT_MAXIMUM_WIDGETS 2048 /* (64) */
 #define HALO_PORT_MAXIMUM_LIGHT_VOLUMES 2048 /* (256) */
 
