@@ -53,7 +53,9 @@ host skips once more than half the machines have voted. The skip itself is
 the campaign's: the host reverts to the state saved when the cutscene began
 and the script carries on past it. Clients catch up through the object,
 device and name syncs. The host keeps its clock running through the revert,
-because the netcode needs it to only go forward (network_coop_skip_reverted).
+because the netcode needs it to only go forward (network_coop_reverted).
+A failed mission (game_lost, or the scripts' game_revert) reverts the same
+way, rather than leaving the players stuck in the failure's cutscene.
 
 Objects (scenery and devices) that aren't synced by network_objects.c are
 found on a client by their scenario name, or, unnamed, by their object
@@ -99,6 +101,7 @@ index and tag, since the map placed them at the same index everywhere.
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
 #include "sound/game_sound.h"
+#include "sound/sound_manager.h"
 #include "sound/sound_definitions.h"
 #include "units/units.h"
 #include "coop_enemies.h"
@@ -182,13 +185,11 @@ enum
 	_coop_event_scenery_animation,
 	_coop_event_effect,
 	_coop_event_attach,
-
-
 	/* the host skipped the cutscene: a client stops its dialogue */
-	_coop_event_cutscene_skipped,
+	/* the host reverted to its last saved state */
+	_coop_event_reverted,
 	/* a unit opened (value TRUE) or closed: a dropship's doors */
 	_coop_event_unit_open,
-
 };
 
 /* distributed_coop_event.type of an effect: at a cutscene flag (value), or on
@@ -272,7 +273,11 @@ struct distributed_coop_presentation
 	/* whether the scripts have set the players' maximum vitality, and to
 	what (network_coop_set_players_vitality) */
 	byte players_vitality_set;
-	byte pad[2];
+	/* the cluster the scripts keep active (object_pvs_activate) plus one,
+	0 for none: a cutscene filmed far from every player (b30's Elite at the
+	shaft door) is active on the clients too. Plus one so the zeroed padding
+	of a host without it reads as none. */
+	short activating_cluster;
 	real players_maximum_body_vitality;
 	real players_maximum_shield_vitality;
 	/* which teams are allies and friends (game_allegiance.c): the scripts
@@ -503,6 +508,19 @@ static struct
 	byte snaps[MAXIMUM_DEVICE_GROUPS];
 	boolean seen[MAXIMUM_DEVICE_GROUPS];
 } client_devices;
+
+/* client: the script sounds (impulse ones: dialogue) it played lately,
+which a skipped cutscene stops */
+enum
+{
+	CLIENT_SCRIPT_SOUND_COUNT = 16,
+};
+
+static struct
+{
+	long definition_indices[CLIENT_SCRIPT_SOUND_COUNT];
+	short next;
+} client_script_sounds;
 
 /* client: the object names that differed from the host's last time */
 static byte client_names_differing[OBJECT_NAME_BYTES];
@@ -1418,6 +1436,7 @@ static void host_presentation(
 	presentation->input_disabled = (byte)!player_input_enabled();
 	presentation->scripted_shake = (byte)player_effect_port_scripted_active();
 	presentation->players_vitality_set = (byte)players_vitality.set;
+	presentation->activating_cluster = (short)(objects_get_activating_cluster_index() + 1);
 	presentation->players_maximum_body_vitality = players_vitality.maximum_body;
 	presentation->players_maximum_shield_vitality = players_vitality.maximum_shield;
 	game_allegiance_get_teams(presentation->ally_teams, presentation->friendly_teams);
@@ -1503,6 +1522,7 @@ static void client_apply_hud(
 	switch (event->type)
 	{
 	case _coop_hud_help_text:
+		hud_scripted_globals->show_hud_help_text = event->frame != 0;
 		if (event->value >= 0 && event->value < hud_messaging_port_message_count())
 			scripted_hud_set_state_message(event->value);
 		break;
@@ -1633,7 +1653,11 @@ static void client_apply_sound(
 	{
 	case _coop_sound_impulse:
 		if (distributed_tag_of_group(event->tag_index, SOUND_DEFINITION_TAG))
+		{
 			scripted_sound_new(event->tag_index, object_index, scale);
+			client_script_sounds.definition_indices[client_script_sounds.next] = event->tag_index;
+			client_script_sounds.next = (short)((client_script_sounds.next + 1) % CLIENT_SCRIPT_SOUND_COUNT);
+		}
 		break;
 	case _coop_sound_looping_start:
 		/* a resent sound that is already playing here is left alone */
@@ -1736,6 +1760,23 @@ static void client_apply_attach(
 	}
 }
 
+/* client: the cutscene was skipped, so the dialogue it started stops (the
+host's went with its revert; its music stops through host_send_looping_sounds) */
+static void client_stop_script_sounds(
+	void)
+{
+	short index;
+
+	for (index = 0; index < CLIENT_SCRIPT_SOUND_COUNT; index++)
+	{
+		long definition_index = client_script_sounds.definition_indices[index];
+
+		if (definition_index != NONE && distributed_tag_of_group(definition_index, SOUND_DEFINITION_TAG))
+			sound_stop_impulse(sound_definition_get(definition_index)->scripting_sound_index);
+		client_script_sounds.definition_indices[index] = NONE;
+	}
+}
+
 static void client_apply_event(
 	struct distributed_coop_event const *event)
 {
@@ -1769,9 +1810,7 @@ static void client_apply_event(
 	case _coop_event_attach:
 		client_apply_attach(event);
 		break;
-
-
-	case _coop_event_cutscene_skipped:
+	case _coop_event_reverted:
 		client_stop_script_sounds();
 		break;
 	case _coop_event_unit_open:
@@ -1784,7 +1823,6 @@ static void client_apply_event(
 				unit_close(event->object_index);
 		}
 		break;
-
 	default:
 		break;
 	}
@@ -1873,6 +1911,7 @@ void network_coop_new_game(
 	csmemset(&host_devices, 0, sizeof(host_devices));
 	csmemset(&client_devices, 0, sizeof(client_devices));
 	csmemset(client_names_differing, 0, sizeof(client_names_differing));
+	csmemset(client_script_sounds.definition_indices, NONE, sizeof(client_script_sounds.definition_indices));
 	csmemset(host_sent_transforms, 0, sizeof(host_sent_transforms));
 	csmemset(host_sent_looks, 0, sizeof(host_sent_looks));
 	csmemset(host_sent_devices, 0, sizeof(host_sent_devices));
@@ -2014,25 +2053,30 @@ static short host_looping_sound_find(
 	return NONE;
 }
 
+/* host, each tick: a looping sound that stopped without the scripts
+stopping it (it ended, or a skipped cutscene's revert took it) is stopped on
+the clients too; the rest are started again with the resent state */
 static void host_send_looping_sounds(
 	void)
 {
 	short index = 0;
 
-	if (!host_resend.refresh)
-		return;
 	while (index < host_looping_sound_count)
 	{
 		long definition_index = host_looping_sounds[index].definition_index;
 		struct distributed_coop_event *event;
 
-		/* it stopped on its own: drop it */
 		if (looping_sound_definition_get(definition_index)->runtime_scripting_sound_index == NONE)
 		{
+			if ((event = event_new(_coop_event_sound)) != NULL)
+			{
+				event->type = _coop_sound_looping_stop;
+				event->tag_index = definition_index;
+			}
 			host_looping_sounds[index] = host_looping_sounds[--host_looping_sound_count];
 			continue;
 		}
-		if ((event = event_new(_coop_event_sound)) != NULL)
+		if (host_resend.refresh && (event = event_new(_coop_event_sound)) != NULL)
 		{
 			event->type = _coop_sound_looping_start;
 			event->tag_index = definition_index;
@@ -2099,6 +2143,9 @@ void network_coop_note_hud(
 		return;
 	event->type = (byte)kind;
 	event->value = value;
+	/* (help text shows only while the scripts show it; the presentation
+	saying so comes a little after the event, so the event carries it) */
+	event->frame = (short)hud_scripted_globals->show_hud_help_text;
 	if (kind == _coop_hud_objective)
 		host_hud_state.objective = value;
 }
@@ -2426,7 +2473,7 @@ boolean network_coop_vote_skip(
 	return TRUE;
 }
 
-/* The skip reverted the host's game state, clock included. The clock is
+/* The host reverted its game state, clock included. The clock is
 put back, since clients and the netcode expect it to only go forward, and
 the script threads' wake times move by the same amount so they still wake
 when they would have. The revert also renumbered the input queues from the
@@ -2435,7 +2482,7 @@ from the restored one, or no tick would run until they caught up. And the
 revert is stamped with the restored time, since the script's game_reverted
 compares the stamp with the clock: otherwise it would play the cinematic
 it was meant to skip. */
-void network_coop_skip_reverted(
+void network_coop_reverted(
 	long now)
 {
 	long ticks;
@@ -2452,7 +2499,15 @@ void network_coop_skip_reverted(
 	}
 	/* (the dropships' riders kept are of the game state reverted from) */
 	coop_enemies_reset();
-	error(_error_silent, "co-op: cutscene skipped; reverted %ld ticks, clock kept at %ld", ticks, now);
+	error(_error_silent, "co-op: reverted %ld ticks, clock kept at %ld", ticks, now);
+	event_new(_coop_event_reverted);
+}
+
+void network_coop_skip_done(
+	void)
+{
+	if (!coop_host())
+		return;
 	skip_vote_clear();
 	skip_vote.requested = FALSE;
 	skip_vote.cooldown_until = game_time_get() + SKIP_COOLDOWN_TICKS;
@@ -2864,6 +2919,7 @@ static void client_presentation_apply(
 		!coop_spectate_watching_rider(0)) || coop_spectate_nothing_to_watch(0));
 	if (coop_presentation.cinematic_started)
 		cinematic_show_letterbox(TEST_FLAG(presentation->flags, _presentation_letterbox_bit));
+	objects_port_set_activating_cluster((short)(presentation->activating_cluster - 1));
 	if (coop_presentation.host_camera)
 	{
 		real_vector3d forward, up;
