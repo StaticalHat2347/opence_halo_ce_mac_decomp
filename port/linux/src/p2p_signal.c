@@ -118,6 +118,13 @@ enum
 	MAXIMUM_BROKER_READS = 8,
 };
 
+static const char SERVER_BROWSER_TOPIC[] = "hceu/browser/1";
+
+enum
+{
+    SERVER_BROWSER_PUBLISH_INTERVAL = 10000,
+};
+
 enum
 {
 	_broker_idle,
@@ -150,6 +157,7 @@ struct broker
 	/* the topics it has been asked for */
 	char host_topic[TOPIC_SIZE];
 	char join_topic[TOPIC_SIZE];
+	char browser_topic[TOPIC_SIZE];
 	unsigned char input[BUFFER_SIZE];
 	int input_size;
 	unsigned char output[BUFFER_SIZE];
@@ -196,6 +204,10 @@ static struct
 	struct broker brokers[MAXIMUM_BROKERS];
 	int broker_count;
 	char client_identifier[24];
+
+	/* public Internet Server Browser */
+	int browsing;
+	unsigned long browser_publish_time;
 
 	/* hosting */
 	int hosting;
@@ -382,6 +394,7 @@ static void broker_topic(struct broker *broker, const char *topic, int subscribe
 	unsigned char body[4 + TOPIC_SIZE + 1];
 	int size = 0;
 
+
 	if (++broker->packet_identifier == 0)
 		broker->packet_identifier = 1;
 	body[size++] = (unsigned char)(broker->packet_identifier >> 8);
@@ -404,17 +417,19 @@ static void broker_publish(struct broker *broker, const char *topic, const unsig
 /* the topics a ready broker should be subscribed to */
 static void broker_sync_topics(struct broker *broker)
 {
-	const char *wanted[2];
-	char *had[2];
+	const char *wanted[3];
+	char *had[3];
 	int index;
 
 	if (broker->state != _broker_ready)
 		return;
 	wanted[0] = signalling.hosting ? signalling.host_topic : "";
 	wanted[1] = signalling.joining ? signalling.join_topic : "";
+	wanted[2] = signalling.browsing ? SERVER_BROWSER_TOPIC : "";
 	had[0] = broker->host_topic;
 	had[1] = broker->join_topic;
-	for (index = 0; index < 2; index++)
+	had[2] = broker->browser_topic;
+	for (index = 0; index < 3; index++)
 	{
 		if (!strcmp(wanted[index], had[index]))
 			continue;
@@ -426,12 +441,70 @@ static void broker_sync_topics(struct broker *broker)
 	}
 }
 
+static void publish_everywhere(const char *topic,
+	const unsigned char *payload, int size);
+
+static void server_browser_publish(const char *invite,
+	const wchar_t *game_name, const char *map_name,
+	int engine_type, int player_count, int maximum_player_count)
+{
+	unsigned char payload[MAXIMUM_MESSAGE_SIZE];
+	char name[16];
+	int invite_length, name_length, map_length;
+	int index, size = 8;
+
+	if (!invite || !invite[0] || !game_name || !map_name)
+		return;
+
+	invite_length = (int)strlen(invite);
+	if (invite_length <= 0 ||
+		invite_length >= P2P_SERVER_BROWSER_INVITE_SIZE)
+		return;
+
+	for (index = 0; game_name[index] && index < (int)sizeof(name) - 1; index++)
+	{
+		wchar_t c = game_name[index];
+		name[index] = c >= 0x20 && c < 0x7f ? (char)c : '?';
+	}
+	name[index] = 0;
+
+	name_length = (int)strlen(name);
+	map_length = (int)strlen(map_name);
+	if (map_length >= 64)
+		map_length = 63;
+
+	if (size + invite_length + name_length + map_length > MAXIMUM_MESSAGE_SIZE)
+		return;
+
+	payload[0] = 'B';
+	payload[1] = 1;
+	payload[2] = (unsigned char)engine_type;
+	payload[3] = (unsigned char)player_count;
+	payload[4] = (unsigned char)maximum_player_count;
+	payload[5] = (unsigned char)invite_length;
+	payload[6] = (unsigned char)name_length;
+	payload[7] = (unsigned char)map_length;
+
+	memcpy(payload + size, invite, (size_t)invite_length);
+	size += invite_length;
+	memcpy(payload + size, name, (size_t)name_length);
+	size += name_length;
+	memcpy(payload + size, map_name, (size_t)map_length);
+	size += map_length;
+
+	publish_everywhere(SERVER_BROWSER_TOPIC, payload, size);
+}
+
 static void publish_everywhere(const char *topic, const unsigned char *payload, int size)
 {
 	int index;
 
 	for (index = 0; index < signalling.broker_count; index++)
 	{
+		platform_log("P2P DEBUG: publish topic=%s broker=%s state=%d size=%d",
+			topic, signalling.brokers[index].host,
+			signalling.brokers[index].state, size);
+
 		if (signalling.brokers[index].state == _broker_ready)
 			broker_publish(&signalling.brokers[index], topic, payload, size);
 	}
@@ -925,6 +998,51 @@ static void publish_received(struct broker *broker, const char *topic, const uns
 	unsigned char message[MAXIMUM_MESSAGE_SIZE];
 	int message_size;
 
+	if (signalling.browsing && !strcmp(topic, SERVER_BROWSER_TOPIC))
+	{
+		char invite[P2P_SERVER_BROWSER_INVITE_SIZE];
+		char game_name[64];
+		char map_name[64];
+		int invite_length, name_length, map_length;
+		int offset = 8;
+
+		(void)broker;
+
+		if (size < offset || payload[0] != 'B' || payload[1] != 1)
+		{
+			return;
+		}
+
+		invite_length = payload[5];
+		name_length = payload[6];
+		map_length = payload[7];
+
+
+		if (invite_length <= 0 ||
+			invite_length >= (int)sizeof(invite) ||
+			name_length >= (int)sizeof(game_name) ||
+			map_length >= (int)sizeof(map_name) ||
+			offset + invite_length + name_length + map_length != size)
+		{
+			return;
+		}
+
+		memcpy(invite, payload + offset, (size_t)invite_length);
+		invite[invite_length] = 0;
+		offset += invite_length;
+
+		memcpy(game_name, payload + offset, (size_t)name_length);
+		game_name[name_length] = 0;
+		offset += name_length;
+
+		memcpy(map_name, payload + offset, (size_t)map_length);
+		map_name[map_length] = 0;
+
+		p2p_server_browser_advertisement(invite, game_name, map_name,
+			payload[2], payload[3], payload[4]);
+		return;
+	}
+
 	if (size > MAXIMUM_MESSAGE_SIZE + P2P_SEAL_OVERHEAD)
 		return;
 	if (signalling.hosting && !strcmp(topic, signalling.host_topic))
@@ -1007,6 +1125,9 @@ static void broker_parse(struct broker *broker)
 
 				memcpy(topic, body + 2, (size_t)topic_size);
 				topic[topic_size] = 0;
+				if (!strcmp(topic, SERVER_BROWSER_TOPIC))
+				platform_log("P2P DEBUG: received MQTT topic=%s broker=%s payload_size=%d",
+					topic, broker->host, remaining - offset);
 				publish_received(broker, topic, body + offset, remaining - offset);
 			}
 		}
@@ -1180,6 +1301,27 @@ void p2p_signal_update(const int *read, int read_count, const int *write, int wr
 		send_join();
 }
 
+static void sync_all_topics(void);
+
+void p2p_signal_server_browser_start(void)
+{
+	if (signalling.browsing)
+		return;
+
+	signalling.browsing = 1;
+	p2p_signal_start();
+	sync_all_topics();
+}
+
+void p2p_signal_server_browser_stop(void)
+{
+	if (!signalling.browsing)
+		return;
+
+	signalling.browsing = 0;
+	sync_all_topics();
+}
+
 int p2p_signal_connected(void)
 {
 	int index;
@@ -1198,6 +1340,26 @@ static void sync_all_topics(void)
 
 	for (index = 0; index < signalling.broker_count; index++)
 		broker_sync_topics(&signalling.brokers[index]);
+}
+
+void p2p_signal_server_browser_publish(const char *invite,
+	const wchar_t *game_name, const char *map_name,
+	int engine_type, int player_count, int maximum_player_count)
+{
+	if (!signalling.hosting || !p2p_signal_connected())
+		return;
+
+	if (signalling.browser_publish_time &&
+		!elapsed(signalling.browser_publish_time, SERVER_BROWSER_PUBLISH_INTERVAL))
+		return;
+
+	server_browser_publish(invite, game_name, map_name,
+		engine_type, player_count, maximum_player_count);
+
+	platform_log("Server Browser: published host advertisement (%d/%d players, engine %d, map %s)",
+		player_count, maximum_player_count, engine_type, map_name);
+
+	signalling.browser_publish_time = p2p_now();
 }
 
 void p2p_signal_host(const unsigned char *token)

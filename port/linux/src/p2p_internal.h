@@ -88,6 +88,11 @@ int p2p_peer_reoffered(const unsigned char *identifier, const unsigned char *sec
 of the game) */
 void p2p_invite_received(const char *text);
 
+/* A public Server Browser advertisement received by signalling.
+Called on the p2p thread while p2p_lock is already held. */
+void p2p_server_browser_advertisement(const char *invite, const char *game_name,
+	const char *map_name, int engine_type, int player_count, int maximum_player_count);
+
 /* ---------- p2p_signal.c: signalling through public MQTT brokers */
 
 /* connects to the brokers, if not already; called from the p2p thread */
@@ -105,6 +110,15 @@ asks anew, with a new nonce (as after the session with the host ended
 before the tunnel reached it: the host makes one session of a request) */
 void p2p_signal_join(const unsigned char *host_hash, const unsigned char *token);
 void p2p_signal_stop_joining(void);
+
+/* Public Internet Server Browser discovery. These only control the public
+directory topic; private invite signalling remains separate. */
+void p2p_signal_server_browser_start(void);
+void p2p_signal_server_browser_stop(void);
+void p2p_signal_server_browser_publish(const char *invite,
+    const wchar_t *game_name, const char *map_name,
+    int engine_type, int player_count, int maximum_player_count);
+
 /* whether any broker is connected */
 int p2p_signal_connected(void);
 

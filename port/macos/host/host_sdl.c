@@ -298,6 +298,16 @@ int host_sdl_rumble_gamepad(uint32_t gamepad, uint32_t low, uint32_t high, uint3
 	return object ? SDL_RumbleGamepad(object, (Uint16)low, (Uint16)high, milliseconds) : 0;
 }
 
+void host_sdl_scancode_name(int32_t scancode, char *buffer, uint32_t size)
+{
+    SDL_strlcpy(buffer, SDL_GetScancodeName((SDL_Scancode)scancode), size);
+}
+
+int32_t host_sdl_scancode_from_name(const char *name)
+{
+    return (int32_t)SDL_GetScancodeFromName(name);
+}
+
 /* ---------- audio */
 
 /* SDL calls audio_callback on its own audio thread, which cannot run guest
@@ -493,6 +503,22 @@ int host_sdl_set_window_fullscreen(uint32_t window, int fullscreen)
 	return object ? SDL_SetWindowFullscreen(object, fullscreen != 0) : 0;
 }
 
+int host_sdl_set_window_fullscreen_mode(uint32_t window, uint32_t display)
+{
+	SDL_Window *object = handle_get(window, _handle_window);
+	const SDL_DisplayMode *mode =
+		display ? SDL_GetDesktopDisplayMode((SDL_DisplayID)display) : NULL;
+
+	return object ? SDL_SetWindowFullscreenMode(object, mode) : 0;
+}
+
+int host_sdl_set_window_size(uint32_t window, int width, int height)
+{
+	SDL_Window *object = handle_get(window, _handle_window);
+
+	return object ? SDL_SetWindowSize(object, width, height) : 0;
+}
+
 int host_sdl_get_window_size(uint32_t window, int *width, int *height)
 {
 	SDL_Window *object = handle_get(window, _handle_window);
@@ -535,6 +561,41 @@ int host_sdl_get_desktop_display_mode(uint32_t display, int32_t *fields, float *
 	reals[0] = mode->pixel_density;
 	reals[1] = mode->refresh_rate;
 	return 1;
+}
+
+int host_sdl_get_current_display_mode(uint32_t display, int32_t *fields, float *reals)
+{
+	const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode((SDL_DisplayID)display);
+
+	if (!mode)
+		return 0;
+	fields[0] = (int32_t)mode->format;
+	fields[1] = mode->w;
+	fields[2] = mode->h;
+	fields[3] = mode->refresh_rate_numerator;
+	fields[4] = mode->refresh_rate_denominator;
+	reals[0] = mode->pixel_density;
+	reals[1] = mode->refresh_rate;
+	return 1;
+}
+
+int64_t host_sdl_ticks_ns(void)
+{
+	return (int64_t)SDL_GetTicksNS();
+}
+
+void host_sdl_delay_precise(uint64_t nanoseconds)
+{
+	SDL_DelayPrecise(nanoseconds);
+}
+
+int host_sdl_push_quit_event(void)
+{
+	SDL_Event event;
+
+	SDL_zero(event);
+	event.type = SDL_EVENT_QUIT;
+	return SDL_PushEvent(&event);
 }
 
 int host_sdl_wait_event_timeout(void *event, int milliseconds)
@@ -740,5 +801,124 @@ int host_sdl_file_dialog_result(char *buffer, uint32_t size)
 	if (state == 1)
 		SDL_strlcpy(buffer, dialog_path, size);
 	pthread_mutex_unlock(&dialog_lock);
+	return state;
+}
+
+/* ---------- community Server Browser directory ----------
+
+The HTTPS request runs on a host worker thread.  The guest cannot be called
+from that thread, so (like the file dialog above) it polls the completed
+result through host_server_browser_result().
+*/
+
+#define SERVER_BROWSER_URL "https://halo.milenko.org/v1/games"
+#define SERVER_BROWSER_RESULT_SIZE (64 * 1024)
+
+static pthread_mutex_t server_browser_lock = PTHREAD_MUTEX_INITIALIZER;
+/* 0 = idle/in progress, 1 = result ready, -1 = request failed */
+static int server_browser_state;
+static char server_browser_json[SERVER_BROWSER_RESULT_SIZE];
+
+static void *server_browser_fetch_thread(void *unused)
+{
+	FILE *pipe;
+	char command[512];
+	char result[SERVER_BROWSER_RESULT_SIZE];
+	size_t used = 0;
+	int status;
+
+	(void)unused;
+
+	snprintf(command, sizeof(command),
+		"/usr/bin/curl -fsS --max-time 10 --connect-timeout 5 '%s'",
+		SERVER_BROWSER_URL);
+
+	pipe = popen(command, "r");
+	if (pipe)
+	{
+		while (used + 1 < sizeof(result))
+		{
+			size_t got = fread(result + used, 1, sizeof(result) - used - 1, pipe);
+			used += got;
+			if (got == 0)
+				break;
+		}
+
+		result[used] = '\0';
+		status = pclose(pipe);
+
+		pthread_mutex_lock(&server_browser_lock);
+		if (status == 0 && used > 0)
+		{
+			memcpy(server_browser_json, result, used + 1);
+			server_browser_state = 1;
+		}
+		else
+		{
+			server_browser_json[0] = '\0';
+			server_browser_state = -1;
+		}
+		pthread_mutex_unlock(&server_browser_lock);
+	}
+	else
+	{
+		pthread_mutex_lock(&server_browser_lock);
+		server_browser_json[0] = '\0';
+		server_browser_state = -1;
+		pthread_mutex_unlock(&server_browser_lock);
+	}
+
+	return NULL;
+}
+
+void host_server_browser_fetch(void)
+{
+	pthread_t thread;
+
+	pthread_mutex_lock(&server_browser_lock);
+
+	/* Don't start another request while one is running. */
+	if (server_browser_state == 0 && server_browser_json[0] != '\0')
+	{
+		pthread_mutex_unlock(&server_browser_lock);
+		return;
+	}
+
+	server_browser_state = 0;
+	server_browser_json[0] = 1; /* marks the request as in progress */
+
+	pthread_mutex_unlock(&server_browser_lock);
+
+	if (pthread_create(&thread, NULL, server_browser_fetch_thread, NULL) == 0)
+		pthread_detach(thread);
+	else
+	{
+		pthread_mutex_lock(&server_browser_lock);
+		server_browser_json[0] = '\0';
+		server_browser_state = -1;
+		pthread_mutex_unlock(&server_browser_lock);
+	}
+}
+
+int host_server_browser_result(char *buffer, uint32_t size)
+{
+	int state;
+
+	pthread_mutex_lock(&server_browser_lock);
+	state = server_browser_state;
+
+	if (state == 1 && buffer && size)
+	{
+		snprintf(buffer, size, "%s", server_browser_json);
+		server_browser_state = 0;
+		server_browser_json[0] = '\0';
+	}
+	else if (state < 0)
+	{
+		server_browser_state = 0;
+		server_browser_json[0] = '\0';
+	}
+
+	pthread_mutex_unlock(&server_browser_lock);
 	return state;
 }

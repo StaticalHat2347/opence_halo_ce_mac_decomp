@@ -63,6 +63,7 @@ their handlers open opens.
 #include "interface/ui_widget.h"
 #include "main/main.h"
 #include "networking/network_game_manager.h"
+#include "../src/p2p.h"
 #include "saved games/player_profile.h"
 #include "tag_files/tag_groups.h"
 #include "text/text_group.h"
@@ -1733,6 +1734,7 @@ boolean playlist_profile_get_display_name(long index, wchar_t *name);
 boolean input_get_key(struct key_stroke *key);
 /* the platform layer's */
 int p2p_join_invite(char const *text);
+int p2p_join_host_matches(unsigned char const *identifier);
 int p2p_invite_link(char *link, int size);
 void p2p_set_hosting_allowed(int allowed);
 int p2p_peer_address(unsigned char const *identifier, unsigned long *address);
@@ -1743,6 +1745,15 @@ int config_boolean(char const *name);
 
 static wchar_t const *const engine_names[] = { L"", L"CTF", L"SLAYER", L"ODDBALL", L"KING OF THE HILL", L"RACE" };
 static short const maximum_players[] = { 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
+
+static struct
+{
+	struct p2p_server_browser_entry entries[P2P_SERVER_BROWSER_MAXIMUM_ENTRIES];
+	short count;
+	short chosen;
+	short joining;
+	struct advertised_game *resolved_game;
+} server_browser;
 
 static struct
 {
@@ -2236,7 +2247,36 @@ static void browser_games_read(void)
 	short pass, index;
 
 	multiplayer.game_count = 0;
-	if (!games || multiplayer.mode == _multiplayer_mode_server_browser)
+
+	if (multiplayer.mode == _multiplayer_mode_server_browser)
+	{
+		server_browser.count = (short)p2p_server_browser_entries(
+			server_browser.entries, P2P_SERVER_BROWSER_MAXIMUM_ENTRIES);
+		if (server_browser.chosen >= server_browser.count)
+			server_browser.chosen = (short)MAX(0, server_browser.count - 1);
+
+		/* After selecting an Internet-directory entry, P2P reaches only
+		that host. Wait for Halo's genuine advertised game from it rather
+		than manufacturing an advertised_game from directory metadata. */
+		server_browser.resolved_game = NULL;
+		if (server_browser.joining && games)
+		{
+			for (index = 0; index < MAXIMUM_ADVERTISED_GAMES; index++)
+			{
+				struct advertised_game *game = &games[index];
+
+				if (network_game_client_advertised_game_is_valid(game) &&
+					p2p_join_host_matches(game->xnaddr + 2))
+				{
+					server_browser.resolved_game = game;
+					break;
+				}
+			}
+		}
+		return;
+	}
+
+	if (!games)
 		return;
 	/* (the open games, then those under way) */
 	for (pass = 0; pass < 2; pass++)
@@ -2347,7 +2387,10 @@ static boolean browser_initialize(struct widget_instance *screen, struct event_r
 		visible_set(named(screen, "header_sort_arrows", index), FALSE);
 	multiplayer.game_chosen = 0;
 	if (multiplayer.mode == _multiplayer_mode_server_browser)
+	{
+		p2p_server_browser_start();
 		return TRUE;
+	}
 	return ui_widget_port_browse(screen, event, widget_deleted);
 }
 
@@ -2380,8 +2423,14 @@ static void browser_update(struct widget_instance *list)
 	short focused = browser_row_index(list->focused_child);
 
 	browser_games_read();
-	if (focused != NONE && focused < multiplayer.game_count)
+	if (multiplayer.mode == _multiplayer_mode_server_browser)
+	{
+		if (focused != NONE && focused < server_browser.count)
+			server_browser.chosen = focused;
+	}
+	else if (focused != NONE && focused < multiplayer.game_count)
 		multiplayer.game_chosen = focused;
+
 	for (row = list->child; row; row = row->next)
 	{
 		short index = browser_row_index(row);
@@ -2390,19 +2439,58 @@ static void browser_update(struct widget_instance *list)
 
 		if (index == NONE)
 			continue;
-		row->visible = index < multiplayer.game_count;
-		if (index >= multiplayer.game_count)
-			continue;
-		game = multiplayer.games[index];
-		ustrncpy(text, game->game_name, NUMBEROF(game->game_name) - 1);
-		text[NUMBEROF(game->game_name) - 1] = 0;
-		text_set(named(row, "server_item_server_name", 0), text);
-		game_map_name(game, text);
-		text_set(named(row, "server_item_map", 0), text);
-		text_set(named(row, "server_item_type", 0), engine_names[PIN(game->engine_type, 0, 5)]);
-		usnprintf(text, ROW_TEXT_LENGTH - 1, L"%d/%d", game->player_count, game->maximum_player_count);
-		text_set(named(row, "server_item_players", 0), text);
-		text_set(named(row, "server_item_ping", 0), advertised_in_progress(game) ? L"LIVE" : L"");
+
+		if (multiplayer.mode == _multiplayer_mode_server_browser)
+		{
+			struct p2p_server_browser_entry *entry;
+			short map_index;
+
+			row->visible = index < server_browser.count;
+			if (index >= server_browser.count)
+				continue;
+
+			entry = &server_browser.entries[index];
+
+			ustrncpy(text, entry->game_name, NUMBEROF(entry->game_name) - 1);
+			text[NUMBEROF(entry->game_name) - 1] = 0;
+			text_set(named(row, "server_item_server_name", 0), text);
+
+			for (map_index = 0;
+				entry->map_name[map_index] && map_index < ROW_TEXT_LENGTH - 1;
+				map_index++)
+			{
+				text[map_index] = (wchar_t)(unsigned char)entry->map_name[map_index];
+			}
+			text[map_index] = 0;
+			text_set(named(row, "server_item_map", 0), text);
+
+			text_set(named(row, "server_item_type", 0),
+				engine_names[PIN(entry->engine_type, 0, 5)]);
+			usnprintf(text, ROW_TEXT_LENGTH - 1, L"%d/%d",
+				entry->player_count, entry->maximum_player_count);
+			text_set(named(row, "server_item_players", 0), text);
+			text_set(named(row, "server_item_ping", 0), L"");
+		}
+		else
+		{
+			row->visible = index < multiplayer.game_count;
+			if (index >= multiplayer.game_count)
+				continue;
+
+			game = multiplayer.games[index];
+			ustrncpy(text, game->game_name, NUMBEROF(game->game_name) - 1);
+			text[NUMBEROF(game->game_name) - 1] = 0;
+			text_set(named(row, "server_item_server_name", 0), text);
+			game_map_name(game, text);
+			text_set(named(row, "server_item_map", 0), text);
+			text_set(named(row, "server_item_type", 0),
+				engine_names[PIN(game->engine_type, 0, 5)]);
+			usnprintf(text, ROW_TEXT_LENGTH - 1, L"%d/%d",
+				game->player_count, game->maximum_player_count);
+			text_set(named(row, "server_item_players", 0), text);
+			text_set(named(row, "server_item_ping", 0),
+				advertised_in_progress(game) ? L"LIVE" : L"");
+		}
 		visible_set(named(row, "server_item_locked", 0), FALSE);
 		visible_set(named(row, "server_item_dedicated", 0), FALSE);
 		visible_set(named(row, "server_item_classic", 0), FALSE);
@@ -2411,7 +2499,18 @@ static void browser_update(struct widget_instance *list)
 		wchar_t text[ROW_TEXT_LENGTH * 2];
 
 		if (multiplayer.mode == _multiplayer_mode_server_browser)
-			text[0] = 0;
+		{
+			if (!server_browser.count)
+				usnprintf(text, NUMBEROF(text) - 1, L"Looking for Internet games...");
+			else
+			{
+				struct p2p_server_browser_entry *entry =
+					&server_browser.entries[server_browser.chosen];
+
+				usnprintf(text, NUMBEROF(text) - 1, L"%d players of %d",
+					entry->player_count, entry->maximum_player_count);
+			}
+		}
 		else if (!multiplayer.game_count)
 		{
 			usnprintf(text, NUMBEROF(text) - 1, L"%s", multiplayer.mode == _multiplayer_mode_direct_link ?
@@ -2435,17 +2534,30 @@ static void browser_update(struct widget_instance *list)
 		long players = 0;
 		short index;
 
-		for (index = 0; index < multiplayer.game_count; index++)
-			players += multiplayer.games[index]->player_count;
+		if (multiplayer.mode == _multiplayer_mode_server_browser)
+		{
+			for (index = 0; index < server_browser.count; index++)
+				players += server_browser.entries[index].player_count;
+		}
+		else
+		{
+			for (index = 0; index < multiplayer.game_count; index++)
+				players += multiplayer.games[index]->player_count;
+		}
+
 		string_get(JOIN_GAME_LABELS, _join_game_label_players, label);
 		usnprintf(text, ROW_TEXT_LENGTH - 1, L"%s %ld", label, players);
 		text_set(named(stats, "player_count_label", 0), text);
+
 		/* (one page: the list holds every game found) */
 		string_get(JOIN_GAME_LABELS, _join_game_label_page, label);
 		usnprintf(text, ROW_TEXT_LENGTH - 1, L"%s 1/1", label);
 		text_set(named(stats, "page_count_label", 0), text);
+
 		string_get(JOIN_GAME_LABELS, _join_game_label_servers, label);
-		usnprintf(text, ROW_TEXT_LENGTH - 1, L"%s %d", label, multiplayer.game_count);
+		usnprintf(text, ROW_TEXT_LENGTH - 1, L"%s %d", label,
+			multiplayer.mode == _multiplayer_mode_server_browser ?
+			server_browser.count : multiplayer.game_count);
 		text_set(named(stats, "server_count_label", 0), text);
 	}
 	browser_focus(list);
@@ -2490,6 +2602,59 @@ static boolean browser_select(struct widget_instance *widget, struct event_recor
 	boolean *widget_deleted)
 {
 	short row = browser_row_index(widget);
+
+	if (multiplayer.mode == _multiplayer_mode_server_browser)
+	{
+		if (row != NONE)
+			server_browser.chosen = row;
+
+		if (row != NONE || strstr(widget->name, "button_join"))
+		{
+			struct p2p_server_browser_entry *entry;
+
+			if (server_browser.chosen < 0 ||
+				server_browser.chosen >= server_browser.count)
+			{
+				return campaign_fail();
+			}
+
+			/* Once Halo's genuine advertisement from the selected P2P host
+			arrives, join it through the normal game join path. */
+			if (server_browser.joining && server_browser.resolved_game)
+			{
+				struct advertised_game *game = server_browser.resolved_game;
+
+				server_browser.joining = 0;
+				platform_log("menus: Server Browser joining resolved Internet game");
+
+				if (advertised_in_progress(game))
+				{
+					csmemcpy(multiplayer.preview_key_id, game->key_id,
+						sizeof(multiplayer.preview_key_id));
+					csmemcpy(multiplayer.preview_xnaddr, game->xnaddr,
+						sizeof(multiplayer.preview_xnaddr));
+					return ui_widget_port_open(widget, PREVIEW_NAME, widget_deleted);
+				}
+
+				if (!multiplayer_player(controller))
+					return FALSE;
+				return ui_widget_port_join(widget, game, LOBBY_NAME, widget_deleted);
+			}
+
+			entry = &server_browser.entries[server_browser.chosen];
+			if (!p2p_join_invite(entry->invite))
+			{
+				platform_log("menus: Server Browser entry has an invalid invite");
+				return campaign_fail();
+			}
+
+			server_browser.joining = 1;
+			server_browser.resolved_game = NULL;
+			platform_log("menus: Server Browser reaching selected Internet game");
+			return TRUE;
+		}
+		return TRUE;
+	}
 
 	if (row != NONE)
 		multiplayer.game_chosen = row;
@@ -3424,6 +3589,15 @@ boolean pc_menu_event_function_invoke(
 		else if (!strcmp(name, "gamespy screen init"))
 		{
 			return browser_initialize(widget, event, widget_deleted);
+		}
+		else if (!strcmp(name, "gamespy screen dispose"))
+		{
+			if (multiplayer.mode == _multiplayer_mode_server_browser)
+			{
+				p2p_server_browser_stop();
+				server_browser.joining = 0;
+				server_browser.resolved_game = NULL;
+			}
 		}
 		else if (!strcmp(name, "gamespy select item") || !strcmp(name, "gamespy select button"))
 		{

@@ -317,9 +317,6 @@ rasterizer_text_cache_initialize(
 	return success;
 }
 
-static real text_scale = 1.0f;
-static real text_scale_origin_x = 0.0f;
-static real text_scale_origin_y = 0.0f;
 
 void
 rasterizer_text_set_shadow_color(

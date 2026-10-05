@@ -40,6 +40,7 @@ from .android_build import (GUEST_ABI_FLAGS as ANDROID_ABI_FLAGS, GUEST_CODE_FLA
 from .linux_build import (MINIUPNPC_DEFINES, MINIUPNPC_DIR, MUSL_MATH_DIR, XDK_INCLUDE, compile_launcher,
                           game_defines_and_includes, game_sources, miniupnpc_sources, musl_math_sources,
                           xdk_headers)
+from .embed_assets import hud_assets_build
 from .ninja_syntax import Writer
 
 PORT_DIR = Path("port/macos")
@@ -387,6 +388,11 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
 
     # ---------- the guest
 
+    # high-resolution HUD textures, fonts, and PC menu files
+    embedded_assets = hud_assets_build(
+        n, target, build / "generated" / "hud_hires_assets.c"
+    )
+
     libc_includes = [
         f"-isystem {libc_include}", f"-isystem {arch}", f"-isystem {MUSL_DIR}/arch/generic",
         f"-isystem {MUSL_DIR}/include",
@@ -459,6 +465,10 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         if source.name.startswith("posix_") or source.name in guest_host_only:
             continue
         objects.append(guest_object(source, platform_cflags))
+
+    for source in embedded_assets:
+        objects.append(guest_object(source, platform_cflags))
+
     # the menus' XML parser
     for name in ("xmlparse.c", "xmlrole.c", "xmltok.c"):
         objects.append(guest_object(EXPAT_DIR / name, platform_cflags))

@@ -474,8 +474,9 @@ symbols in this file:
 #include "cache/cache_files.h"
 #include "interface/player_ui.h"
 
-/* port: internet play's Discord presence (port/linux/src/p2p.c) */
+/* port: internet play / public Server Browser (port/linux/src/p2p.c) */
 void p2p_set_game_player_counts(int count, int maximum);
+void p2p_set_game_metadata(const wchar_t *game_name, const char *map_name, int engine_type);
 
 /* ---------- constants */
 
@@ -1327,8 +1328,10 @@ boolean network_game_server_idle(
 		}
 	}
 
-	/* (what Discord shows of a game hosted for internet play) */
+	/* Internet presence and public Server Browser metadata. */
 	p2p_set_game_player_counts(server->game.player_count, server->game.maximum_players);
+	p2p_set_game_metadata(server->game.name, server->game.map.name,
+		server->game.variant.game_engine_index);
 
 	if (network_game_server_game_is_valid(server))
 	{

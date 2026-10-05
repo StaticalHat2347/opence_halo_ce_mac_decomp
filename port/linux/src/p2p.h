@@ -26,6 +26,10 @@ int p2p_hand_off_invite(void);
 words around it. Returns nonzero if it held an invite */
 int p2p_join_invite(const char *text);
 
+/* Whether this machine identifier (the 6 bytes carried by its XNADDR)
+is the host of the invite most recently selected for joining. */
+int p2p_join_host_matches(const unsigned char *identifier);
+
 /* this machine's identifier, which its XNADDR carries (6 bytes) */
 const unsigned char *p2p_identifier(void);
 /* the address the game reaches the machine with this identifier at, if it
@@ -71,6 +75,29 @@ void p2p_socket_closed(int socket, unsigned short datagram_port);
 from the main thread */
 const char *p2p_take_clipboard_text(void);
 
+/* A lightweight public Internet-directory entry. It is discovery metadata
+only; joining still waits for Halo's real network_advertised_game after
+the P2P connection reaches the host. */
+enum
+{
+	P2P_SERVER_BROWSER_MAXIMUM_ENTRIES = 64,
+	P2P_SERVER_BROWSER_INVITE_SIZE = 80,
+};
+
+struct p2p_server_browser_entry
+{
+	char invite[P2P_SERVER_BROWSER_INVITE_SIZE];
+	wchar_t game_name[16];
+	char map_name[64];
+	short engine_type;
+	short player_count;
+	short maximum_player_count;
+};
+
+/* Copies the currently known public directory entries into entries and
+returns how many were copied. Safe to call from the game's main thread. */
+int p2p_server_browser_entries(struct p2p_server_browser_entry *entries, int maximum_count);
+
 /* whether a game this machine hosts may be joined from the internet (an
 invite, Discord): the PC menus' Create Game > Internet (the default), not
 > LAN */
@@ -84,6 +111,7 @@ int p2p_invite_link(char *link, int size);
 are shown). The game's server calls it as they change (calling it with the
 same counts again costs little) */
 void p2p_set_game_player_counts(int count, int maximum);
+void p2p_set_game_metadata(const wchar_t *game_name, const char *map_name, int engine_type);
 
 /* the sizes of a Discord user's id and name as kept (with their end), and
 the text kept of either as told: only the characters allowed (digits in an

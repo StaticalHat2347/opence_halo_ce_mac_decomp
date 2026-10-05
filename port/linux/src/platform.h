@@ -34,6 +34,12 @@ the SDK headers are read, exactly as game code sees them. */
 /* prints "halo-linux: <message>" to stderr */
 void platform_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
+/* Community Server Browser directory.
+   start() begins an asynchronous request.
+   result(): 0 = pending, 1 = JSON ready, -1 = failed. */
+void platform_server_browser_start(void);
+int platform_server_browser_result(char *buffer, unsigned int size);
+
 /* reports an SDK entry point the Linux port does not implement, once per
 name; the caller then behaves as a failing or empty call */
 void platform_unimplemented(const char *name);

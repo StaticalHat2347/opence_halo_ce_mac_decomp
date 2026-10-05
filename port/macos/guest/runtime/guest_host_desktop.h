@@ -14,11 +14,17 @@ prototypes. Parameter types follow the rules of guest_host.h.
 void host_sdl_destroy_window(unsigned int window);
 long long host_sdl_get_window_flags(unsigned int window);
 int host_sdl_set_window_fullscreen(unsigned int window, int fullscreen);
+int host_sdl_set_window_fullscreen_mode(unsigned int window, unsigned int display);
+int host_sdl_set_window_size(unsigned int window, int width, int height);
 int host_sdl_get_window_size(unsigned int window, int *width, int *height);
 void host_sdl_warp_mouse_in_window(unsigned int window, float x, float y);
 unsigned int host_sdl_get_primary_display(void);
 unsigned int host_sdl_get_display_for_window(unsigned int window);
 int host_sdl_get_desktop_display_mode(unsigned int display, int *fields, float *reals);
+int host_sdl_get_current_display_mode(unsigned int display, int *fields, float *reals);
+long long host_sdl_ticks_ns(void);
+void host_sdl_delay_precise(unsigned long long nanoseconds);
+int host_sdl_push_quit_event(void);
 int host_sdl_wait_event_timeout(void *event, int milliseconds);
 unsigned int host_sdl_create_renderer(unsigned int window);
 void host_sdl_destroy_renderer(unsigned int renderer);
@@ -34,5 +40,9 @@ int host_sdl_show_message_box(unsigned int flags, const char *title, const char 
 	const int *button_flags, const int *button_ids, const char *texts, int *chosen);
 void host_sdl_show_open_file_dialog(const char *filters, int count);
 int host_sdl_file_dialog_result(char *buffer, unsigned int size);
+
+/* Asynchronous community Server Browser directory request. */
+void host_server_browser_fetch(void);
+int host_server_browser_result(char *buffer, unsigned int size);
 
 #endif

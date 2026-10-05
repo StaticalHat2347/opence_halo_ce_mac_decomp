@@ -39,6 +39,8 @@ host_sdl_gamepad_axis
 host_sdl_gamepad_button
 host_sdl_gamepad_type
 host_sdl_rumble_gamepad
+host_sdl_scancode_name
+host_sdl_scancode_from_name
 host_sdl_open_audio_stream
 host_sdl_put_audio_stream_data
 host_sdl_resume_audio_stream_device
@@ -54,11 +56,17 @@ host_errno
 host_sdl_destroy_window
 host_sdl_get_window_flags
 host_sdl_set_window_fullscreen
+host_sdl_set_window_fullscreen_mode
+host_sdl_set_window_size
 host_sdl_get_window_size
 host_sdl_warp_mouse_in_window
 host_sdl_get_primary_display
 host_sdl_get_display_for_window
 host_sdl_get_desktop_display_mode
+host_sdl_get_current_display_mode
+host_sdl_ticks_ns
+host_sdl_delay_precise
+host_sdl_push_quit_event
 host_sdl_wait_event_timeout
 host_sdl_create_renderer
 host_sdl_destroy_renderer
@@ -72,3 +80,5 @@ host_sdl_render_present
 host_sdl_show_message_box
 host_sdl_show_open_file_dialog
 host_sdl_file_dialog_result
+host_server_browser_fetch
+host_server_browser_result

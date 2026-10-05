@@ -326,6 +326,11 @@ static struct
 	int reported_player_count;
 	int reported_player_maximum;
 
+	/* public Server Browser metadata for the hosted game */
+	wchar_t game_name[16];
+	char game_map_name[32];
+	int game_engine_type;
+
 	/* joining: until the host is reached, or JOIN_TIMEOUT */
 	int join_requested;
 	int joining;
@@ -333,6 +338,12 @@ static struct
 	unsigned char join_host_hash[P2P_KEY_HASH_SIZE];
 	unsigned char join_token[P2P_TOKEN_SIZE];
 	unsigned long join_time;
+
+	/* Public Internet directory entries. The signalling thread owns these;
+	the game/UI thread reads copies through p2p_server_browser_entries(). */
+	struct p2p_server_browser_entry server_browser[P2P_SERVER_BROWSER_MAXIMUM_ENTRIES];
+	unsigned long server_browser_seen[P2P_SERVER_BROWSER_MAXIMUM_ENTRIES];
+	int server_browser_count;
 
 	char clipboard[P2P_LINK_SIZE];
 	int has_clipboard;
@@ -2316,6 +2327,20 @@ int p2p_join_invite(const char *text)
 	return result > 0;
 }
 
+int p2p_join_host_matches(const unsigned char *host)
+{
+	int matches;
+
+	if (!host || !p2p.running)
+		return 0;
+
+	pthread_mutex_lock(&p2p_lock);
+	matches = !memcmp(host, p2p.join_host, P2P_IDENTIFIER_SIZE);
+	pthread_mutex_unlock(&p2p_lock);
+
+	return matches;
+}
+
 void p2p_invite_received(const char *text)
 {
 	/* (an older version's is logged as such) */
@@ -2413,6 +2438,10 @@ static void update_hosting(void)
 			p2p.reported_player_maximum = maximum;
 			p2p_discord_set_hosting(p2p.invite + strlen("halo://join/"), count, maximum);
 		}
+
+		p2p_signal_server_browser_publish(p2p.invite,
+			p2p.game_name, p2p.game_map_name, p2p.game_engine_type,
+			count, maximum);
 	}
 }
 
@@ -2432,6 +2461,31 @@ int p2p_invite_link(char *link, int size)
 	snprintf(link, (size_t)size, "%s", hosting ? p2p.invite : "");
 	pthread_mutex_unlock(&p2p_lock);
 	return hosting;
+}
+
+void p2p_set_game_metadata(const wchar_t *game_name, const char *map_name, int engine_type)
+{
+	int index;
+
+	pthread_mutex_lock(&p2p_lock);
+
+	if (game_name)
+	{
+		for (index = 0; game_name[index] && index < 15; index++)
+			p2p.game_name[index] = game_name[index];
+		p2p.game_name[index] = 0;
+	}
+	else
+	{
+		p2p.game_name[0] = 0;
+	}
+
+	snprintf(p2p.game_map_name, sizeof(p2p.game_map_name), "%s",
+		map_name ? map_name : "");
+
+	p2p.game_engine_type = engine_type;
+
+	pthread_mutex_unlock(&p2p_lock);
 }
 
 void p2p_set_game_player_counts(int count, int maximum)
@@ -2575,6 +2629,368 @@ static void update_upnp(void)
 		return;
 	}
 	pthread_detach(thread);
+}
+
+void p2p_server_browser_start(void)
+{
+	pthread_mutex_lock(&p2p_lock);
+	if (p2p.running)
+		p2p_signal_server_browser_start();
+	pthread_mutex_unlock(&p2p_lock);
+
+	/* Fetch the community Internet directory asynchronously. */
+	platform_server_browser_start();
+}
+
+void p2p_server_browser_stop(void)
+{
+	pthread_mutex_lock(&p2p_lock);
+	if (p2p.running)
+		p2p_signal_server_browser_stop();
+	p2p.server_browser_count = 0;
+	pthread_mutex_unlock(&p2p_lock);
+}
+
+void p2p_server_browser_advertisement(const char *invite, const char *game_name,
+	const char *map_name, int engine_type, int player_count, int maximum_player_count)
+{
+	struct p2p_server_browser_entry *entry;
+	int index, slot = -1;
+
+
+	if (!invite || !game_name || !map_name)
+		return;
+
+	/* Only current-format invites belong in this directory. */
+	{
+		unsigned char hash[P2P_KEY_HASH_SIZE], token[P2P_TOKEN_SIZE];
+
+		if (parse_invite(invite, hash, token) != 1)
+			return;
+	}
+
+	if (engine_type < 0 || engine_type > 5 ||
+		player_count < 0 || maximum_player_count <= 0 ||
+		player_count > maximum_player_count ||
+		maximum_player_count > 128)
+		return;
+
+	/* Refresh an existing listing for this invite. */
+	for (index = 0; index < p2p.server_browser_count; index++)
+	{
+		if (!strcmp(p2p.server_browser[index].invite, invite))
+		{
+			slot = index;
+			break;
+		}
+	}
+
+	/* Otherwise append while there is room. */
+	if (slot < 0)
+	{
+		if (p2p.server_browser_count >= P2P_SERVER_BROWSER_MAXIMUM_ENTRIES)
+			return;
+		slot = p2p.server_browser_count++;
+	}
+
+	entry = &p2p.server_browser[slot];
+	memset(entry, 0, sizeof(*entry));
+
+	snprintf(entry->invite, sizeof(entry->invite), "%s", invite);
+
+	/* Directory text is ASCII-safe for now. Do not put platform wchar_t
+	on the wire. */
+	for (index = 0; game_name[index] &&
+		index < (int)(sizeof(entry->game_name) / sizeof(entry->game_name[0])) - 1;
+		index++)
+	{
+		unsigned char c = (unsigned char)game_name[index];
+		entry->game_name[index] = c >= 0x20 && c < 0x7f ? (wchar_t)c : L'?';
+	}
+
+	snprintf(entry->map_name, sizeof(entry->map_name), "%s", map_name);
+	entry->engine_type = (short)engine_type;
+	entry->player_count = (short)player_count;
+	entry->maximum_player_count = (short)maximum_player_count;
+	p2p.server_browser_seen[slot] = p2p_now();
+}
+
+/* ---------- community Server Browser JSON ---------- */
+
+static const char *server_browser_json_value(const char *object, const char *end,
+	const char *key)
+{
+	char pattern[64];
+	const char *found;
+
+	snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+	found = object;
+
+	while ((found = strstr(found, pattern)) != NULL && found < end)
+	{
+		const char *value = found + strlen(pattern);
+
+		while (value < end && (*value == ' ' || *value == '\t' ||
+			*value == '\r' || *value == '\n'))
+			value++;
+
+		if (value >= end || *value != ':')
+		{
+			found += strlen(pattern);
+			continue;
+		}
+
+		value++;
+		while (value < end && (*value == ' ' || *value == '\t' ||
+			*value == '\r' || *value == '\n'))
+			value++;
+
+		return value < end ? value : NULL;
+	}
+
+	return NULL;
+}
+
+static int server_browser_json_integer(const char *object, const char *end,
+	const char *key, int *result)
+{
+	const char *value = server_browser_json_value(object, end, key);
+	char *after;
+	long number;
+
+	if (!value || value >= end)
+		return 0;
+
+	number = strtol(value, &after, 10);
+	if (after == value || after > end)
+		return 0;
+
+	*result = (int)number;
+	return 1;
+}
+
+static int server_browser_json_boolean(const char *object, const char *end,
+	const char *key, int *result)
+{
+	const char *value = server_browser_json_value(object, end, key);
+
+	if (!value)
+		return 0;
+
+	if (end - value >= 4 && !strncmp(value, "true", 4))
+	{
+		*result = 1;
+		return 1;
+	}
+	if (end - value >= 5 && !strncmp(value, "false", 5))
+	{
+		*result = 0;
+		return 1;
+	}
+
+	return 0;
+}
+
+static int server_browser_json_string(const char *object, const char *end,
+	const char *key, char *result, size_t size)
+{
+	const char *value = server_browser_json_value(object, end, key);
+	size_t used = 0;
+
+	if (!value || value >= end || *value != '"' || !size)
+		return 0;
+
+	value++;
+
+	while (value < end && *value != '"')
+	{
+		unsigned char c = (unsigned char)*value++;
+
+		if (c == '\\')
+		{
+			if (value >= end)
+				return 0;
+
+			c = (unsigned char)*value++;
+			switch (c)
+			{
+			case '"':
+			case '\\':
+			case '/':
+				break;
+			case 'b':
+				c = '\b';
+				break;
+			case 'f':
+				c = '\f';
+				break;
+			case 'n':
+				c = '\n';
+				break;
+			case 'r':
+				c = '\r';
+				break;
+			case 't':
+				c = '\t';
+				break;
+			default:
+				/* Names/maps do not need JSON Unicode decoding here.
+				   Preserve unsupported escapes visibly instead. */
+				c = '?';
+				break;
+			}
+		}
+
+		if (used + 1 < size)
+			result[used++] = (char)c;
+	}
+
+	if (value >= end || *value != '"')
+		return 0;
+
+	result[used] = 0;
+	return 1;
+}
+
+static void server_browser_parse_directory(const char *json)
+{
+	const char *cursor = json;
+	int loaded = 0;
+
+	while ((cursor = strchr(cursor, '{')) != NULL)
+	{
+		const char *end = cursor + 1;
+		int depth = 1;
+		int in_string = 0;
+		int escaped = 0;
+
+		/* Find this object's matching closing brace without being confused
+		   by braces inside JSON strings. */
+		while (*end && depth)
+		{
+			if (in_string)
+			{
+				if (escaped)
+					escaped = 0;
+				else if (*end == '\\')
+					escaped = 1;
+				else if (*end == '"')
+					in_string = 0;
+			}
+			else
+			{
+				if (*end == '"')
+					in_string = 1;
+				else if (*end == '{')
+					depth++;
+				else if (*end == '}')
+					depth--;
+			}
+			end++;
+		}
+
+		if (depth)
+			break;
+
+		{
+			char invite_hash[65];
+			char invite[P2P_SERVER_BROWSER_INVITE_SIZE];
+			char name[128];
+			char map[128];
+			char mode[32];
+			int version, engine, players, maximum_players, verified;
+
+			if (server_browser_json_string(cursor, end, "invite",
+					invite_hash, sizeof(invite_hash)) &&
+				strlen(invite_hash) == 64 &&
+				server_browser_json_string(cursor, end, "name",
+					name, sizeof(name)) &&
+				server_browser_json_string(cursor, end, "map",
+					map, sizeof(map)) &&
+				server_browser_json_string(cursor, end, "mode",
+					mode, sizeof(mode)) &&
+				server_browser_json_integer(cursor, end, "version", &version) &&
+				server_browser_json_integer(cursor, end, "engine", &engine) &&
+				server_browser_json_integer(cursor, end, "players", &players) &&
+				server_browser_json_integer(cursor, end, "maximum_players",
+					&maximum_players) &&
+				server_browser_json_boolean(cursor, end, "verified", &verified) &&
+				version == HALO_PORT_NETWORK_VERSION &&
+				verified &&
+				!strcmp(mode, "multiplayer"))
+			{
+				snprintf(invite, sizeof(invite), "halo://join/%s", invite_hash);
+
+				p2p_server_browser_advertisement(invite, name, map,
+					engine, players, maximum_players);
+				loaded++;
+			}
+		}
+
+		/* Move one byte past this opening brace instead of past the whole
+		   object. The top-level object contains the games array, so its
+		   nested game objects must also be visited. */
+		cursor++;
+	}
+
+	platform_log("Server Browser: loaded %d compatible community game%s (network version %d)",
+		loaded, loaded == 1 ? "" : "s", HALO_PORT_NETWORK_VERSION);
+}
+
+int p2p_server_browser_entries(struct p2p_server_browser_entry *entries, int maximum_count)
+{
+	int count;
+
+	if (!entries || maximum_count <= 0 || !p2p.running)
+		return 0;
+
+	/* Poll the asynchronous community directory request. */
+	{
+		static char directory_json[64 * 1024];
+		int result = platform_server_browser_result(directory_json,
+			sizeof(directory_json));
+
+		if (result == 1)
+		{
+			pthread_mutex_lock(&p2p_lock);
+			server_browser_parse_directory(directory_json);
+			pthread_mutex_unlock(&p2p_lock);
+		}
+		else if (result < 0)
+			platform_log("Server Browser: community directory request failed");
+	}
+
+	pthread_mutex_lock(&p2p_lock);
+
+	/* Remove directory hosts that have stopped advertising. */
+	{
+		int index = 0;
+
+		while (index < p2p.server_browser_count)
+		{
+			if (elapsed(p2p.server_browser_seen[index], 30000))
+			{
+				int last = --p2p.server_browser_count;
+
+				if (index != last)
+				{
+					p2p.server_browser[index] = p2p.server_browser[last];
+					p2p.server_browser_seen[index] = p2p.server_browser_seen[last];
+				}
+				continue;
+			}
+			index++;
+		}
+	}
+
+	count = p2p.server_browser_count;
+	if (count > maximum_count)
+		count = maximum_count;
+	if (count > 0)
+		memcpy(entries, p2p.server_browser, sizeof(*entries) * (size_t)count);
+	pthread_mutex_unlock(&p2p_lock);
+
+	return count;
 }
 
 const char *p2p_take_clipboard_text(void)

@@ -255,6 +255,17 @@ bool SDL_SetWindowFullscreen(SDL_Window *window, bool fullscreen)
 	return host_sdl_set_window_fullscreen((unsigned int)window, fullscreen) != 0;
 }
 
+bool SDL_SetWindowFullscreenMode(SDL_Window *window, const SDL_DisplayMode *mode)
+{
+	return host_sdl_set_window_fullscreen_mode(
+		(unsigned int)window, mode ? mode->displayID : 0) != 0;
+}
+
+bool SDL_SetWindowSize(SDL_Window *window, int w, int h)
+{
+	return host_sdl_set_window_size((unsigned int)window, w, h) != 0;
+}
+
 bool SDL_GetWindowSize(SDL_Window *window, int *w, int *h)
 {
 	int width = 0, height = 0;
@@ -301,6 +312,46 @@ const SDL_DisplayMode *SDL_GetDesktopDisplayMode(SDL_DisplayID displayID)
 	mode.refresh_rate = reals[1];
 	return &mode;
 }
+
+const SDL_DisplayMode *SDL_GetCurrentDisplayMode(SDL_DisplayID displayID)
+{
+	static __thread SDL_DisplayMode mode;
+	int fields[5];
+	float reals[2];
+
+	if (!host_sdl_get_current_display_mode(displayID, fields, reals))
+		return NULL;
+
+	memset(&mode, 0, sizeof(mode));
+	mode.displayID = displayID;
+	mode.format = (SDL_PixelFormat)fields[0];
+	mode.w = fields[1];
+	mode.h = fields[2];
+	mode.refresh_rate_numerator = fields[3];
+	mode.refresh_rate_denominator = fields[4];
+	mode.pixel_density = reals[0];
+	mode.refresh_rate = reals[1];
+	return &mode;
+}
+
+Uint64 SDL_GetTicksNS(void)
+{
+	return (Uint64)host_sdl_ticks_ns();
+}
+
+void SDL_DelayPrecise(Uint64 ns)
+{
+	host_sdl_delay_precise(ns);
+}
+
+bool SDL_PushEvent(SDL_Event *event)
+{
+	if (!event || event->type != SDL_EVENT_QUIT)
+		return false;
+
+	return host_sdl_push_quit_event() != 0;
+}
+
 
 /* ---------- the open file dialog
 
@@ -446,4 +497,16 @@ bool SDL_RenderDebugText(SDL_Renderer *renderer, float x, float y, const char *s
 bool SDL_RenderPresent(SDL_Renderer *renderer)
 {
 	return host_sdl_render_present((unsigned int)renderer) != 0;
+}
+
+/* ---------- community Server Browser directory ---------- */
+
+void platform_server_browser_start(void)
+{
+	host_server_browser_fetch();
+}
+
+int platform_server_browser_result(char *buffer, unsigned int size)
+{
+	return host_server_browser_result(buffer, size);
 }

@@ -21,6 +21,7 @@ high-res HUD's are (hud_hires.c).
 #include "hud_hires.h"
 #include "menu_files.h"
 #include "platform.h"
+#include "posix.h"
 #include "port_config.h"
 #include "xgpu.h"
 
@@ -151,33 +152,71 @@ static void files_gather(void)
 	}
 #ifndef HALO_ANDROID
 	{
-		/* (the folder's own and its folders': SDL's * does not cross a /) */
-		static const char *const patterns[] = { "*.xml", "*/*.xml" };
-		int pattern;
+		void *directory;
+		char name[1024];
 
-		for (pattern = 0; pattern < 2; pattern++)
+		/* XML files directly in the menus folder */
+		directory = posix_directory_open(folder);
+		while (directory && posix_directory_next(directory, name, sizeof(name)))
 		{
-		int count = 0;
-		char **names = SDL_GlobDirectory(folder, patterns[pattern], 0, &count);
-		int name;
-
-		for (name = 0; names && name < count; name++)
-		{
+			size_t length = strlen(name);
 			unsigned long size = 0;
 			unsigned char *data;
 
-			if (file_find(names[name]) >= 0)
+			if (length < 4 || strcmp(name + length - 4, ".xml"))
 				continue;
-			snprintf(path, sizeof(path), "%s/%s", folder, names[name]);
+			if (file_find(name) >= 0)
+				continue;
+
+			snprintf(path, sizeof(path), "%s/%s", folder, name);
 			data = file_read(path, &size);
 			if (data)
 			{
 				platform_log("menus: adding %s", path);
-				file_add(names[name], data, size, 1);
+				file_add(name, data, size, 1);
 			}
 		}
-		SDL_free(names);
+		if (directory)
+			posix_directory_close(directory);
+
+		/* XML files one directory below the menus folder */
+		directory = posix_directory_open(folder);
+		while (directory && posix_directory_next(directory, name, sizeof(name)))
+		{
+			void *subdirectory;
+			char subfolder[1200];
+			char child[1024];
+
+			snprintf(subfolder, sizeof(subfolder), "%s/%s", folder, name);
+			subdirectory = posix_directory_open(subfolder);
+			while (subdirectory &&
+				posix_directory_next(subdirectory, child, sizeof(child)))
+			{
+				char relative[1200];
+				size_t length = strlen(child);
+				unsigned long size = 0;
+				unsigned char *data;
+
+				if (length < 4 || strcmp(child + length - 4, ".xml"))
+					continue;
+
+				snprintf(relative, sizeof(relative), "%s/%s", name, child);
+				if (file_find(relative) >= 0)
+					continue;
+
+				snprintf(path, sizeof(path), "%s/%s", folder, relative);
+				data = file_read(path, &size);
+				if (data)
+				{
+					platform_log("menus: adding %s", path);
+					file_add(relative, data, size, 1);
+				}
+			}
+			if (subdirectory)
+				posix_directory_close(subdirectory);
 		}
+		if (directory)
+			posix_directory_close(directory);
 	}
 #endif
 }

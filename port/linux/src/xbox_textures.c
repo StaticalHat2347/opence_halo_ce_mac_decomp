@@ -21,7 +21,7 @@ memory_watch.c detects that by write-protecting the pages.
 #include "port_config.h"
 
 #include <stdio.h>
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 #define GL_BGRA GL_RGBA
 #endif
 #include <stdlib.h>
@@ -538,7 +538,7 @@ static GLenum compressed_format(unsigned char kind)
 /* debug.texture_dump_directory writes level 0 of every upload as a TGA, read back from GL */
 static void texture_dump(GLenum target, const struct xgpu_texture_description *description)
 {
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	/* ES cannot read textures back */
 	(void)target;
 	(void)description;
