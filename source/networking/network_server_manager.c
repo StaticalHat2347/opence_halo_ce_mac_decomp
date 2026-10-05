@@ -473,10 +473,13 @@ symbols in this file:
 
 #include "cache/cache_files.h"
 #include "interface/player_ui.h"
+#include "tag_files/tag_files.h"
 
-/* port: internet play / public Server Browser (port/linux/src/p2p.c) */
+/* port: internet play's Discord presence (port/linux/src/p2p.c), and the
+server browser's listing of a public game (p2p_lobby.c) */
 void p2p_set_game_player_counts(int count, int maximum);
-void p2p_set_game_metadata(const wchar_t *game_name, const char *map_name, int engine_type);
+void p2p_set_game_listing(const char *name, const char *map, const char *gametype, int engine_type, int open,
+	int in_progress, int has_teams);
 
 /* ---------- constants */
 
@@ -761,6 +764,10 @@ static void network_game_server_remove_players_gone_while_loading(
 	struct network_game_server *server);
 
 /* ---------- globals */
+
+/* port: the map for the next co-op round after a win
+(network_game_server_port_cooperative_won); empty when there is none */
+static char network_game_server_cooperative_next_map[sizeof(((struct network_game *)NULL)->map.name)];
 
 struct network_game_server network_game_server_memory_do_not_use_directly;
 boolean network_game_server_memory_do_not_use_directly_in_use = FALSE;
@@ -1179,6 +1186,9 @@ void network_game_server_dispose(
 {
 	match_assert(NETWORK_SERVER_MANAGER_FILE, 0x120, server);
 
+	/* port: a won co-op round's next level belongs to this server alone */
+	network_game_server_cooperative_next_map[0] = 0;
+
 	switch (server->state)
 	{
 	case _network_game_server_state_pregame:
@@ -1312,6 +1322,48 @@ static boolean network_game_server_network_lost(
 	return now - down_time > NETWORK_GAME_SERVER_CLIENT_TIMEOUT;
 }
 
+/* port: wide text as the listing has it: ASCII, a Latin letter with a mark
+its plain letter ('?' for the rest: player_name_character_ascii, as the
+server browser validates the name as a player's) */
+static void listing_text(char *text, int size, wchar_t const *wide, int length)
+{
+	int index;
+
+	for (index = 0; index < size - 1 && index < length && wide[index]; index++)
+		text[index] = player_name_character_ascii(wide[index]);
+	text[index] = 0;
+}
+
+/* port: the server browser's listing of the game (shown only if hosted
+for the internet and public: p2p_lobby.c), as its advertisement has it
+(network_server_message_handler.c) */
+static void network_game_server_list(
+	struct network_game_server *server)
+{
+	struct network_game *game = &server->game;
+	short state = network_game_server_get_state(server, NULL);
+	char name[NUMBEROF(game->name) + 1];
+	char gametype[NUMBEROF(game->variant.human_readable_game_description) + 1];
+	boolean in_progress = state != _network_game_server_state_pregame || network_game_server_game_is_loading(server);
+	boolean open = state == _network_game_server_state_ingame ? network_game_server_accepts_late_joins(server) :
+		network_game_server_game_is_open(server) && network_game_has_free_player_slot(game);
+
+	listing_text(name, sizeof(name), game->name, NUMBEROF(game->name));
+	listing_text(gametype, sizeof(gametype), game->variant.human_readable_game_description,
+		NUMBEROF(game->variant.human_readable_game_description));
+	/* co-op: add the difficulty */
+	if (!game->variant.game_engine_index && game->difficulty >= 0 && game->difficulty < 4)
+	{
+		static char const *const difficulty_names[] = { "Easy", "Normal", "Heroic", "Legendary" };
+		size_t length = strlen(gametype);
+
+		snprintf(gametype + length, sizeof(gametype) - length, " %s", difficulty_names[game->difficulty]);
+	}
+	/* (the scenario's name, not its path: the listing has 32 characters) */
+	p2p_set_game_listing(name, tag_name_strip_path(game->map.name), gametype, game->variant.game_engine_index, open,
+		in_progress, game->variant.universal_variant.teams);
+}
+
 boolean network_game_server_idle(
 	struct network_game_server *server)
 {
@@ -1328,10 +1380,10 @@ boolean network_game_server_idle(
 		}
 	}
 
-	/* Internet presence and public Server Browser metadata. */
+	/* (what Discord shows of a game hosted for internet play, and the
+	server browser's listing) */
 	p2p_set_game_player_counts(server->game.player_count, server->game.maximum_players);
-	p2p_set_game_metadata(server->game.name, server->game.map.name,
-		server->game.variant.game_engine_index);
+	network_game_server_list(server);
 
 	if (network_game_server_game_is_valid(server))
 	{
@@ -3798,6 +3850,55 @@ void network_game_server_port_set_settings(
 		network_game_server_port_settings_apply(server);
 }
 
+void network_game_server_port_cooperative_won(
+	char const *next_map)
+{
+	struct network_game_server *server = global_network_game_server_get();
+
+	if (!server)
+		return;
+	csstrncpy(network_game_server_cooperative_next_map, next_map ? next_map : server->game.map.name,
+		sizeof(network_game_server_cooperative_next_map) - 1);
+	network_game_server_cooperative_next_map[sizeof(network_game_server_cooperative_next_map) - 1] = 0;
+	network_game_server_switch_to_postgame(server);
+}
+
+/* port: reapply the co-op settings after a won round, since the playlist
+the next round is set up from (network_game_server_setup_game_from_playlist)
+has a multiplayer gametype and map */
+static void network_game_server_cooperative_round(
+	struct network_game_server *server)
+{
+	struct game_variant variant;
+
+	if (!network_game_server_cooperative_next_map[0])
+		return;
+	csmemset(&variant, 0, sizeof(variant));
+	ustrncpy(variant.human_readable_game_description, L"Co-op",
+		NUMBEROF(variant.human_readable_game_description) - 1);
+	csmemcpy(&server->game.variant, &variant, sizeof(server->game.variant));
+	network_game_server_variant_options(&server->game.variant, &server->game.variant_options);
+	csstrncpy(server->game.map.name, network_game_server_cooperative_next_map, sizeof(server->game.map.name) - 1);
+	server->game.map.name[sizeof(server->game.map.name) - 1] = 0;
+	main_set_multiplayer_map_name(server->game.map.name);
+	server->game.maximum_teams = 1;
+	network_game_server_cooperative_next_map[0] = 0;
+}
+
+void network_game_server_port_set_cooperative(
+	struct network_game_server *server,
+	short difficulty)
+{
+	if (!server || server->state != _network_game_server_state_pregame)
+		return;
+	server->game.difficulty = difficulty;
+	server->game.maximum_players = MAXIMUM_NETWORK_PLAYER_COUNT;
+	if (!network_game_server_send_game_data_pregame(server))
+		network_event("network_game_server_port_set_cooperative() failed to send updated game settings to clients");
+
+	return;
+}
+
 /* port: a gametype's PC options: the menus' (player_ui_set_game_variant_options)
 when it is the menus' gametype, else its defaults */
 static void network_game_server_variant_options(
@@ -4555,6 +4656,7 @@ boolean network_game_server_reset_to_pregame(
 			network_game_reset_for_next_round(&server->game, FALSE);
 			if (network_game_server_setup_game_from_playlist(server))
 			{
+				network_game_server_cooperative_round(server);
 				/* the settings record goes out in pieces */
 				/* (the pregame whatever a machine missed: the machines are in it,
 				and the pregame's flush sends the settings again) */
