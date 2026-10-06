@@ -31,7 +31,7 @@ update.h's: posix_update.c on Linux, win32_update.c on Windows.
 
 #ifndef HALO_ANDROID
 
-#include "memory/zlib/zlib.h"
+#include "zlib_prefixed.h"
 
 #include <SDL3/SDL.h>
 #include <stdio.h>
