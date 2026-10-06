@@ -607,21 +607,28 @@ struct gl_device
 	float query_area[VISIBILITY_TEST_SLOTS];
 	GLuint active_query;
 	BOOL visibility_test_active;
-
-	/* (queries read on the CPU) each slot's latest count known, and whether
-	its query has yet to be read: the game spins on a result it is told is
-	incomplete, so a query is read only once it says it is available, and
-	until then the slot's earlier count stands. A frame of The Library's
-	lights makes hundreds of tests. */
+	/* Keep the latest known result for CPU-side visibility queries. */
 	GLuint visibility_known[VISIBILITY_TEST_SLOTS];
 	BOOL visibility_unread[VISIBILITY_TEST_SLOTS];
 #ifdef HALO_GLES
-	/* with atomic counters: one counter per test, used as a ring; the
-	counter a test ended in, per result slot */
+	/* Atomic counters and asynchronous per-frame snapshots. */
 	GLuint visibility_counters;
 	unsigned long counter_next;
 	unsigned long counter_active;
-	unsigned long counter_of_slot[VISIBILITY_TEST_SLOTS];
+	/* Reading the counters waits for the draws that counted, which stops
+	the CPU until the GPU has caught up (the game asks at the start of the
+	next frame), halving the frame rate on drivers that queue frames (Zink,
+	Turnip). Instead, at the end of each frame the GPU copies them into the
+	frame's snapshot buffer of the stream ring, and the frame's tests (each
+	a result slot and its counter) are listed with it. Once its fence has
+	passed (two frames on, D3DDevice_Present) the CPU reads the snapshot
+	into counter_values and gives each listed slot its count: a result is
+	the latest count known, as the desktop's query buffer gives. */
+	GLuint counter_snapshots[STREAM_BUFFER_RING];
+	unsigned short ring_tests[STREAM_BUFFER_RING][VISIBILITY_TEST_SLOTS][2];
+	unsigned long ring_test_count[STREAM_BUFFER_RING];
+	GLuint counter_values[VISIBILITY_TEST_SLOTS];
+	GLuint visibility_latest[VISIBILITY_TEST_SLOTS];
 #else
 	/* each test's latest result, which the GPU writes (as a query buffer)
 	when the test's draws are done: the game waits for results at the start
@@ -1620,10 +1627,19 @@ static void gl_initialize(void)
 #ifdef HALO_GLES
 	if (xgpu_capabilities.atomic_counters)
 	{
+		int ring;
+
 		glGenBuffers(1, &device.visibility_counters);
 		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, device.visibility_counters);
 		glBufferData(GL_ATOMIC_COUNTER_BUFFER, VISIBILITY_TEST_SLOTS * sizeof(GLuint), NULL, GL_DYNAMIC_DRAW);
 		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+		glGenBuffers(STREAM_BUFFER_RING, device.counter_snapshots);
+		for (ring = 0; ring < STREAM_BUFFER_RING; ring++)
+		{
+			glBindBuffer(GL_COPY_WRITE_BUFFER, device.counter_snapshots[ring]);
+			glBufferData(GL_COPY_WRITE_BUFFER, VISIBILITY_TEST_SLOTS * sizeof(GLuint), NULL, GL_STREAM_READ);
+		}
+		glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
 	}
 #endif
 	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
@@ -2112,7 +2128,16 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
 #ifdef HALO_GLES
 	if (xgpu_capabilities.atomic_counters)
 	{
-		device.counter_of_slot[index] = device.counter_active;
+		unsigned long *count = &device.ring_test_count[device.buffer_ring];
+
+		/* (a slot tested twice in a frame is listed twice: the later
+		counter, resolved after, wins) */
+		if (*count < VISIBILITY_TEST_SLOTS)
+		{
+			device.ring_tests[device.buffer_ring][*count][0] = (unsigned short)index;
+			device.ring_tests[device.buffer_ring][*count][1] = (unsigned short)device.counter_active;
+			(*count)++;
+		}
 		device.query_pending[index] = TRUE;
 		return S_OK;
 	}
@@ -2172,11 +2197,9 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
 #ifdef HALO_GLES
 	if (xgpu_capabilities.atomic_counters)
 	{
-		/* reading the buffer waits for the draws that counted */
-		samples = host_gl_read_buffer_word(device.visibility_counters,
-			(unsigned int)(device.counter_of_slot[index] * sizeof(GLuint)));
+		/* the latest count the GPU has finished (counter_snapshots) */
 		if (result)
-			*result = samples;
+			*result = device.visibility_latest[index];
 		return S_OK;
 	}
 #endif
@@ -4776,9 +4799,35 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		xgpu_gl_state_invalidate();
 		xgpu_texture_cache_begin_frame();
 #ifdef HALO_GLES
+	if (xgpu_capabilities.atomic_counters)
+	{
+		/* Snapshot this frame's counters before its GPU fence. */
+		glBindBuffer(GL_COPY_READ_BUFFER, device.visibility_counters);
+		glBindBuffer(GL_COPY_WRITE_BUFFER, device.counter_snapshots[device.buffer_ring]);
+		glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
+			VISIBILITY_TEST_SLOTS * sizeof(GLuint));
+		glBindBuffer(GL_COPY_READ_BUFFER, 0);
+		glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+	}
 		host_gl_fence_frame((unsigned int)device.buffer_ring);
 		device.buffer_ring = (device.buffer_ring + 1) % STREAM_BUFFER_RING;
 		host_gl_wait_frame((unsigned int)device.buffer_ring);
+		if (xgpu_capabilities.atomic_counters && device.ring_test_count[device.buffer_ring])
+		{
+			unsigned long ring = device.buffer_ring;
+			unsigned long test;
+
+			/* the GPU has passed that frame's fence: its copy is complete,
+			and the slot is free for this frame's tests */
+			host_gl_read_buffer(device.counter_snapshots[ring], 0, VISIBILITY_TEST_SLOTS * sizeof(GLuint),
+				device.counter_values);
+			for (test = 0; test < device.ring_test_count[ring]; test++)
+			{
+				device.visibility_latest[device.ring_tests[ring][test][0]] =
+					device.counter_values[device.ring_tests[ring][test][1]];
+			}
+			device.ring_test_count[ring] = 0;
+		}
 		device.stream_buffer = device.stream_buffers[device.buffer_ring];
 		device.index_buffer = device.index_buffers[device.buffer_ring];
 		device.stream_offset = 0;
