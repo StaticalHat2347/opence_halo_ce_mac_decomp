@@ -55,6 +55,7 @@ same datum index (identifier and all), so that any message can name one:
 #include "units/units.h"
 #include "units/biped_definitions.h"
 #include "units/vehicle_definitions.h"
+#include "units/vehicle_datum.h"
 #include "items/items.h"
 #include "items/weapons.h"
 #include "items/weapon_definitions.h"
@@ -65,6 +66,9 @@ same datum index (identifier and all), so that any message can name one:
 #include "network_distributed.h"
 
 #include <math.h>
+
+/* physics.c's */
+extern real global_gravity;
 
 /* units.c's */
 void unit_network_add_weapon(long unit_index, long weapon_index, short slot);
@@ -81,9 +85,22 @@ boolean tag_index_is_group(long tag_index, long group_tag);
 them: its layout is not the public header's */
 struct vehicle_definition
 {
-	byte __unknown0[0x2F8];
+	byte __unknown0[0x2F4];
+	short vehicle_type;
+	short __unknown2F6;
 	real maximum_forward_speed;
 	real maximum_reverse_speed;
+};
+
+typedef char network_objects_vehicle_type_offset_assert[
+	offsetof(struct vehicle_definition, vehicle_type) == 0x2F4 ? 1 : -1];
+/* (vehicles.c's vehicle types: those that float, fly or stay) */
+enum
+{
+	_vehicle_type_human_boat = 2,
+	_vehicle_type_human_plane = 3,
+	_vehicle_type_alien_fighter = 5,
+	_vehicle_type_turret = 6,
 };
 
 typedef char network_objects_vehicle_maximum_forward_speed_offset_assert[
@@ -133,6 +150,12 @@ enum
 	/* the host: the client's ticks it takes as run since a client's vehicle's
 	anchor beyond its own (its messages delayed, then bunched) */
 	VEHICLE_PREDICTION_JITTER_TICKS = 6,
+	/* ... how much higher than a throw takes it a vehicle in the air may be
+	(its bounces, the ground's bumps), world units */
+	VEHICLE_PREDICTION_RISE_TOLERANCE = 2,
+	/* ... and the most of a client's round trip it takes a client's vehicle
+	in the air to be ahead of its copy by */
+	VEHICLE_PREDICTION_CEILING_LEAD_TICKS = 15,
 	/* ... how long it measures predictions from one it took, the anchor,
 	before it takes a newer as the anchor (the jitter and the blend granted
 	once a second, not once a tick) */
@@ -156,6 +179,9 @@ enum
 	/* ... the round trip without one measured, and the most */
 	DEFAULT_OWN_ROUND_TRIP_TICKS = 6,
 	MAXIMUM_OWN_ROUND_TRIP_TICKS = 60,
+	/* ... how long the weapon the host says it picked up may take to reach
+	its unit, to be readied (the host's messages are not in step) */
+	PICKED_UP_WEAPON_TICKS = 3 * TICKS_PER_SECOND,
 	/* the most grenades of a kind a unit carries, as the host says (a dead
 	unit drops each) */
 	MAXIMUM_INVENTORY_GRENADES = 16,
@@ -355,7 +381,6 @@ static struct
 	real_vector3d accepted_velocity;
 	long speed_time;
 	real speeds[2];
-
 	/* the vehicle it last had on the ground (NONE: none), how high, and how
 	fast up it went as it left it, and when (network_objects_note_vehicle_ground) */
 	long ground_vehicle_index;
@@ -366,7 +391,6 @@ static struct
 	real_point3d rest_position;
 	real ground_height;
 	real ground_rise_speed;
-
 } objects_host_vehicle_predictions[MAXIMUM_TRACKED_PLAYERS];
 /* a client: the host's objects it has, by absolute index */
 static long objects_client_has[MAXIMUM_TRACKED_OBJECTS];
@@ -408,6 +432,14 @@ static struct distributed_own_inventory
 	long fired_times[MAXIMUM_WEAPONS_PER_UNIT];
 	long weapon_times[MAXIMUM_WEAPONS_PER_UNIT];
 } objects_client_own_inventories[MAXIMUM_LOCAL_PLAYERS];
+/* ... the weapon each of them last picked up (the host said so), its unit
+and when, until it is readied (definition NONE: none) */
+static struct distributed_picked_up_weapon
+{
+	long unit_index;
+	long definition_index;
+	long time;
+} objects_client_picked_up_weapons[MAXIMUM_LOCAL_PLAYERS];
 /* ... whether it failed to make one of the host's objects since it last
 asked for them (it says so when it asks again) */
 static boolean objects_client_ask_again;
@@ -1660,6 +1692,76 @@ void network_objects_handle_vehicle_prediction(
 	}
 }
 
+/* (the host) where a client's player's vehicle, which that player drives,
+left the ground (network_objects_vehicle_below_ceiling): noted each tick,
+from the host's copy */
+static void network_objects_note_vehicle_ground(
+	short player_index)
+{
+	long vehicle_index = objects_host_vehicle_predictions[player_index].accepted_vehicle_index;
+	struct vehicle_datum *vehicle = vehicle_index != NONE ?
+		(struct vehicle_datum *)object_try_and_get_and_verify_type(vehicle_index, _object_mask_vehicle) : NULL;
+	struct unit_datum *driver;
+
+	if (!vehicle || vehicle->unit.driver_object_index == NONE ||
+		!(driver = unit_get(vehicle->unit.driver_object_index)) || driver->unit.player_index == NONE ||
+		DATUM_INDEX_TO_ABSOLUTE_INDEX(driver->unit.player_index) != player_index)
+	{
+		objects_host_vehicle_predictions[player_index].ground_vehicle_index = NONE;
+		return;
+	}
+	/* (on the ground, or one new to it: from where it is) */
+	if (vehicle->vehicle.airborne_ticks == 0 ||
+		objects_host_vehicle_predictions[player_index].ground_vehicle_index != vehicle_index)
+	{
+		objects_host_vehicle_predictions[player_index].ground_vehicle_index = vehicle_index;
+		objects_host_vehicle_predictions[player_index].ground_time = game_time_get();
+		objects_host_vehicle_predictions[player_index].ground_height = vehicle->object.position.z;
+		objects_host_vehicle_predictions[player_index].ground_rise_speed =
+			MAX(vehicle->object.translational_velocity.k, 0.0f);
+		/* (so written that a speed not a number is none) */
+		if (!(objects_host_vehicle_predictions[player_index].ground_rise_speed <= MAXIMUM_PREDICTED_VEHICLE_SPEED))
+			objects_host_vehicle_predictions[player_index].ground_rise_speed = 0.0f;
+	}
+}
+
+/* (the host) whether a client's player's vehicle that does not fly (nor
+floats) may be where they say it is: on the ground anywhere its speed
+takes it; in the air no higher above where it left the ground than a thing
+thrown up as fast as it went up then (and a tolerance) falls to since (the
+ticks since, less the client's round trip, no more than
+VEHICLE_PREDICTION_CEILING_LEAD_TICKS, and jitter, which are the client's
+ahead): no flying, nor hovering */
+static boolean network_objects_vehicle_below_ceiling(
+	short player_index,
+	long vehicle_index,
+	real_point3d const *position)
+{
+	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
+	short type = vehicle_specific_definition_get(vehicle->definition_index)->vehicle_type;
+	real ticks;
+	real ceiling;
+
+	if (type == _vehicle_type_human_boat || type == _vehicle_type_human_plane ||
+		type == _vehicle_type_alien_fighter || type == _vehicle_type_turret ||
+		objects_host_vehicle_predictions[player_index].ground_vehicle_index != vehicle_index ||
+		vehicle->vehicle.airborne_ticks == 0)
+	{
+		return TRUE;
+	}
+	ticks = (real)(game_time_get() - objects_host_vehicle_predictions[player_index].ground_time) -
+		MIN(distributed_machine_round_trip_ticks(objects_host_vehicle_predictions[player_index].machine_index),
+			(real)VEHICLE_PREDICTION_CEILING_LEAD_TICKS) -
+		(real)VEHICLE_PREDICTION_JITTER_TICKS;
+	if (!(ticks > 0.0f) || !(global_gravity > 0.0f))
+		return TRUE;
+	ceiling = VEHICLE_PREDICTION_RISE_TOLERANCE +
+		(objects_host_vehicle_predictions[player_index].ground_rise_speed + PREDICTED_VEHICLE_SPEED_MARGIN) * ticks -
+		0.5f * global_gravity * ticks * ticks;
+	/* (so written that a position not a number is not below) */
+	return position->z - objects_host_vehicle_predictions[player_index].ground_height <= ceiling;
+}
+
 /* ... taken as they are, within a tolerance, if that machine's player
 still drives it: a little off closed by half, more put there. Each taken
 moves the host's copy, and the next is measured from there, so a client
@@ -1673,8 +1775,9 @@ its speed less as much as the velocity it took of the client was faster
 than twice the top speed: a client that says it goes faster gains nothing
 by it (its gravity on a copy said to hover and fall). A teleporter moves
 the host's copy too, further than it goes since the last taken: it is
-measured from where the host has it only, a new anchor. Which of the client's ticks the host has it at is noted, to tell
-the client. */
+measured from where the host has it only, a new anchor. In the air it is
+no higher than network_objects_vehicle_below_ceiling says. Which of the
+client's ticks the host has it at is noted, to tell the client. */
 void network_objects_apply_vehicle_predictions(
 	void)
 {
@@ -1691,6 +1794,7 @@ void network_objects_apply_vehicle_predictions(
 		real speed;
 		boolean anchored;
 
+		network_objects_note_vehicle_ground(player_index);
 		if (!objects_host_vehicle_predictions[player_index].valid)
 			continue;
 		objects_host_vehicle_predictions[player_index].valid = FALSE;
@@ -1713,6 +1817,10 @@ void network_objects_apply_vehicle_predictions(
 		dz = state->position.z - vehicle->object.position.z;
 		/* (so written that a position not a number is not taken) */
 		if (!(dx * dx + dy * dy + dz * dz <= HOST_VEHICLE_ACCEPT_TOLERANCE * HOST_VEHICLE_ACCEPT_TOLERANCE))
+			continue;
+		/* (no higher in the air than it was thrown up leaving the ground,
+		falling since: past that the host's copy falls as its ticks have it) */
+		if (!network_objects_vehicle_below_ceiling(player_index, state->object_index, &state->position))
 			continue;
 		/* (how fast it may go, a tick) */
 		{
@@ -2632,6 +2740,68 @@ static void distributed_client_apply_inventory(
 		distributed_client_note_own_inventory(own, inventory->unit_index, FALSE);
 }
 
+/* a client's own player picked up a weapon (network_player_show_pickup) */
+void network_objects_client_picked_up_weapon(
+	short local_player_index,
+	long unit_index,
+	long definition_index)
+{
+	struct distributed_picked_up_weapon *picked_up;
+
+	if (local_player_index < 0 || local_player_index >= MAXIMUM_LOCAL_PLAYERS)
+		return;
+	picked_up = &objects_client_picked_up_weapons[local_player_index];
+	picked_up->unit_index = unit_index;
+	picked_up->definition_index = definition_index;
+	picked_up->time = game_time_get();
+}
+
+/* the weapons its own players picked up readied once they have them, as
+unit_add_weapon_to_inventory readies a pickup where it decides it (not
+while firing): the client chooses its players' weapons in hand
+(distributed_client_apply_inventory), and the host follows */
+static void distributed_client_ready_picked_up_weapons(
+	void)
+{
+	short local_player_index;
+
+	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
+	{
+		struct distributed_picked_up_weapon *picked_up = &objects_client_picked_up_weapons[local_player_index];
+		long player_index = local_player_get_player_index(local_player_index);
+		struct player_datum *player = player_index != NONE ? player_try_and_get(player_index) : NULL;
+		long unit_index = distributed_living_unit(player);
+		struct unit_datum *unit;
+		short weapon_slot;
+
+		if (picked_up->definition_index == NONE)
+			continue;
+		if (unit_index == NONE || unit_index != picked_up->unit_index ||
+			game_time_get() - picked_up->time > PICKED_UP_WEAPON_TICKS)
+		{
+			picked_up->definition_index = NONE;
+			continue;
+		}
+		unit = unit_get(unit_index);
+		for (weapon_slot = 0; weapon_slot < MAXIMUM_WEAPONS_PER_UNIT; weapon_slot++)
+		{
+			long weapon_index = unit->unit.weapon_object_indices[weapon_slot];
+			struct weapon_datum *weapon = weapon_index != NONE ? weapon_try_and_get(weapon_index) : NULL;
+
+			if (weapon && weapon->definition_index == picked_up->definition_index)
+				break;
+		}
+		if (weapon_slot == MAXIMUM_WEAPONS_PER_UNIT)
+			continue;
+		if (!TEST_FLAG(unit->unit.control_flags, _unit_control_weapon_primary_trigger_bit))
+		{
+			player_control_set_desired_weapon(unit_index, weapon_slot);
+			unit->unit.desired_weapon_index = weapon_slot;
+		}
+		picked_up->definition_index = NONE;
+	}
+}
+
 void network_objects_handle_inventories(
 	void const *entries,
 	short count)
@@ -2849,6 +3019,7 @@ void network_objects_client_tick(
 	/* (too many to look at one by one later: all of them) */
 	else if (objects_client_new_object_count >= MAXIMUM_CLIENT_NEW_OBJECTS)
 		objects_client_check_all = TRUE;
+	distributed_client_ready_picked_up_weapons();
 	distributed_client_note_own_inventories();
 	distributed_client_send_vehicles();
 	distributed_client_carry_unsteered_vehicles();
@@ -2892,7 +3063,6 @@ void network_objects_new_game(
 		objects_host_vehicle_predictions[index].ground_vehicle_index = NONE;
 		objects_host_vehicle_predictions[index].rest_vehicle_index = NONE;
 	}
-
 	objects_client_synchronized = FALSE;
 	objects_client_ready_time = NONE;
 	objects_client_ready_interval = CLIENT_READY_INTERVAL_TICKS;
@@ -2910,6 +3080,7 @@ void network_objects_new_game(
 	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
 	{
 		objects_client_own_inventories[local_player_index].unit_index = NONE;
+		objects_client_picked_up_weapons[local_player_index].definition_index = NONE;
 		for (index = 0; index < OWN_VEHICLE_POSITION_TICKS; index++)
 		{
 			objects_client_own_vehicles[local_player_index][index].time = NONE;

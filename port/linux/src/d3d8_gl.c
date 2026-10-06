@@ -149,7 +149,7 @@ static BOOL resolution_target(long display_width, long display_height, long *wid
 
 static void screen_mode_choose(long *width, float scale[2])
 {
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	/* display.screen_width, or 0 for the display's shape, which the app
 	passes (port/android/host/host_main.c) */
 	const char *display = getenv("HALO_DISPLAY_WIDTH");
@@ -518,7 +518,7 @@ xgpu_gl_state_invalidate, after which every value is set again. Unknown
 values are all ones, which no real value matches (floats become NaN, which
 compares unequal to everything). */
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 struct attribute_pointer
 {
 	GLuint buffer;
@@ -583,7 +583,7 @@ static struct
 	GLuint array_buffer;
 	GLuint element_array_buffer;
 	unsigned char attribute_enabled[XGPU_VERTEX_ATTRIBUTE_COUNT];
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	struct attribute_pointer attribute_pointers[XGPU_VERTEX_ATTRIBUTE_COUNT];
 #else
 	struct attribute_format attribute_formats[XGPU_VERTEX_ATTRIBUTE_COUNT];
@@ -680,7 +680,7 @@ stride (on desktop GL; ES points each attribute on its own). */
 static void state_attribute_stream(GLuint index, GLuint binding, GLuint buffer, GLint size, GLenum type,
 	GLboolean normalized, BOOL integer, GLsizei stride, unsigned long buffer_offset, unsigned long relative_offset)
 {
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	struct attribute_pointer *pointer = &gl_state.attribute_pointers[index];
 	unsigned long offset = buffer_offset + relative_offset;
 

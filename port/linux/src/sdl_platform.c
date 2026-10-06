@@ -427,6 +427,9 @@ static void platform_fullscreen_kind_apply(void)
 		exclusive && display ? SDL_GetDesktopDisplayMode(display) : NULL);
 }
 
+/* configured fullscreen resolution */
+static void platform_resolution_setting(long *width, long *height);
+
 /* whether the game is, or is to be, fullscreen, and if so the size in
 pixels of the display it fills (d3d8_gl.c draws at that resolution) */
 BOOL platform_screen_mode(long *width, long *height)
@@ -443,28 +446,221 @@ BOOL platform_screen_mode(long *width, long *height)
 	mode = display ? SDL_GetDesktopDisplayMode(display) : NULL;
 	if (!mode)
 		return FALSE;
-	*width = (long)(mode->w * mode->pixel_density + 0.5f);
-	*height = (long)(mode->h * mode->pixel_density + 0.5f);
+
+	platform_resolution_setting(width, height);
+	if (!*width || !*height)
+	{
+		*width = (long)(mode->w * mode->pixel_density + 0.5f);
+		*height = (long)(mode->h * mode->pixel_density + 0.5f);
+	}
 	return TRUE;
 }
 
 #endif
-/* the window's scale (display.window_scale, as the window was made or last
+/* parse a WIDTHxHEIGHT setting */
+static BOOL platform_size_parse(const char *value, long *width, long *height)
+{
+	char *end;
+	long w, h;
+
+	if (!value || !*value)
+		return FALSE;
+
+	w = strtol(value, &end, 10);
+	if (end == value || (*end != 'x' && *end != 'X'))
+		return FALSE;
+
+	h = strtol(end + 1, &end, 10);
+	if (*end || w < 1 || h < 1)
+		return FALSE;
+
+	*width = w;
+	*height = h;
+	return TRUE;
+}
+
+/* the configured fullscreen resolution, if one is set */
+static void platform_resolution_setting(long *width, long *height)
+{
+	const char *value = config_string("display.resolution");
+
+	*width = 0;
+	*height = 0;
+
+	if (value)
+		platform_size_parse(value, width, height);
+}
+
+/* the configured window size, or the default 640x480 */
+static void platform_window_size_setting(long *width, long *height)
+{
+	const char *value = config_string("display.window_size");
+
+	if (!value || !platform_size_parse(value, width, height))
+	{
+		*width = 640;
+		*height = 480;
+	}
+}
+
+/* the display's usable pixel size */
+static BOOL platform_display_size(SDL_DisplayID display, long *width, long *height)
+{
+	const SDL_DisplayMode *mode;
+
+	if (!display)
+		return FALSE;
+
+	mode = SDL_GetDesktopDisplayMode(display);
+	if (!mode)
+		return FALSE;
+
+	*width = (long)(mode->w * mode->pixel_density + 0.5f);
+	*height = (long)(mode->h * mode->pixel_density + 0.5f);
+	return *width > 0 && *height > 0;
+}
+
+static int platform_resolution_add(long *widths, long *heights, int count, int maximum,
+	long width, long height)
+{
+	int index;
+
+	for (index = 0; index < count; index++)
+	{
+		if (widths[index] == width && heights[index] == height)
+			return count;
+	}
+	if (count < maximum)
+	{
+		widths[count] = width;
+		heights[count] = height;
+		count++;
+	}
+	return count;
+}
+
+int platform_display_resolutions(long *widths, long *heights, int maximum)
+{
+	long display_width, display_height, width, height;
+	int count = 0;
+
+	if (maximum < 1 || !platform_sdl_initialize())
+		return 0;
+
+	if (!platform_display_size(
+			SDL_GetPrimaryDisplay(),
+			&display_width, &display_height))
+		return 0;
+
+	/*
+	 * Keep the resolution list independent of SDL's fullscreen-mode
+	 * enumeration. The guest SDL layer does not expose
+	 * SDL_GetFullscreenDisplayModes.
+	 */
+	static const short offered[][2] =
+	{
+		{ 640, 480 },
+		{ 800, 600 },
+		{ 1024, 768 },
+		{ 1280, 720 },
+		{ 1280, 800 },
+		{ 1280, 960 },
+		{ 1440, 900 },
+		{ 1600, 900 },
+		{ 1680, 1050 },
+		{ 1920, 1080 },
+		{ 1920, 1200 },
+		{ 2560, 1440 },
+		{ 2560, 1600 },
+		{ 3840, 2160 }
+	};
+
+	for (unsigned int index = 0;
+		index < sizeof(offered) / sizeof(*offered);
+		index++)
+	{
+		width = offered[index][0];
+		height = offered[index][1];
+
+		if (width <= display_width && height <= display_height)
+			count = platform_resolution_add(
+				widths, heights, count, maximum, width, height);
+	}
+
+	platform_resolution_setting(&width, &height);
+	if (width && height)
+		count = platform_resolution_add(
+			widths, heights, count, maximum, width, height);
+
+	return count;
+}
+
+/* Video Setup's window sizes, by shape (4:3, 16:10, 16:9, 21:9), each from
+the smallest. */
+static const short platform_window_sizes_offered[][2] =
+{
+	{ 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1280, 960 },
+	{ 1600, 1200 }, { 1920, 1440 }, { 2560, 1920 },
+
+	{ 1280, 800 }, { 1440, 900 }, { 1680, 1050 },
+	{ 1920, 1200 }, { 2560, 1600 },
+
+	{ 1280, 720 }, { 1600, 900 }, { 1920, 1080 },
+	{ 2560, 1440 }, { 3840, 2160 },
+
+	{ 2560, 1080 }, { 3440, 1440 }, { 3840, 1600 },
+	{ 5120, 2160 },
+};
+
+int platform_window_sizes(long *widths, long *heights, int maximum)
+{
+	SDL_DisplayID display;
+	SDL_Rect usable;
+	long width, height;
+	int count = 0, index;
+
+	if (maximum < 1 || !platform_sdl_initialize())
+		return 0;
+
+	display = platform_window ? SDL_GetDisplayForWindow(platform_window) : 0;
+	if (!display)
+		display = SDL_GetPrimaryDisplay();
+
+	if (!display || !platform_display_size(display, &width, &height))
+		width = height = 0;
+
+	for (index = 0;
+		index < (int)(sizeof(platform_window_sizes_offered) /
+			sizeof(*platform_window_sizes_offered));
+		index++)
+	{
+		long offered_width = platform_window_sizes_offered[index][0];
+		long offered_height = platform_window_sizes_offered[index][1];
+
+		if (!index || (offered_width <= width && offered_height <= height))
+			count = platform_resolution_add(widths, heights, count, maximum,
+				offered_width, offered_height);
+	}
+
+	return count;
+}
+
+/* the window's size (display.window_size, as the window was made or last
 resized: platform_display_apply) */
-static long platform_window_scale = -1;
+static long platform_window_width = -1, platform_window_height = -1;
 
 BOOL platform_video_initialize(unsigned long width, unsigned long height)
 {
-	int scale = (int)config_integer("display.window_scale");
 	int version;
 
 	if (platform_window)
 		return TRUE;
 	if (!platform_sdl_initialize())
 		return FALSE;
-	if (scale < 1)
-		scale = 1;
-	platform_window_scale = scale;
+
+	(void)width;
+	(void)height;
+	platform_window_size_setting(&platform_window_width, &platform_window_height);
 
 #ifdef HALO_GLES
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -492,11 +688,11 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	platform_window = SDL_CreateWindow("Halo", (int)(width * scale), (int)(height * scale),
 		SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
 #else
-	/* fullscreen at the desktop's resolution unless display.fullscreen is
-	false, where the game draws the display's shape at its resolution
-	(d3d8_gl.c); the window size is the windowed mode F11 switches to and
-	from, where it draws 640x480 */
-	platform_window = SDL_CreateWindow("Halo", (int)(width * scale), (int)(height * scale),
+	/* fullscreen (either kind) unless display.mode is the window, which F11
+	switches to and from: display.window_size, whatever shape the fullscreen
+	picture has. The game draws at the size platform_screen_mode gives
+	(d3d8_gl.c). */
+	platform_window = SDL_CreateWindow("Halo", (int)platform_window_width, (int)platform_window_height,
 		SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
 		(config_boolean("debug.hidden_window") ? SDL_WINDOW_HIDDEN : 0) |
 		(platform_fullscreen_setting() ? SDL_WINDOW_FULLSCREEN : 0));
@@ -539,7 +735,7 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 
 #ifndef HALO_ANDROID
 /* the pixels the picture goes to: the display's in fullscreen, else the
-window's (as display.window_scale makes it, before there is one) */
+window's */
 BOOL platform_output_size(long *width, long *height)
 {
 	if (platform_screen_mode(width, height))
@@ -557,34 +753,30 @@ BOOL platform_output_size(long *width, long *height)
 		}
 		return FALSE;
 	}
-	{
-		long scale = config_integer("display.window_scale");
-
-		if (scale < 1)
-			scale = 1;
-		*width = 640 * scale;
-		*height = 480 * scale;
-		return TRUE;
-	}
+	platform_window_size_setting(width, height);
+	return TRUE;
 }
 #endif
-/* display.fullscreen, display.window_scale (when it changes: the window can
-be resized) and display.vsync, as Settings has written them */
+/* display.mode, display.resolution (fullscreen's display mode),
+display.window_size (when it changes: the window can be resized) and
+display.vsync, as Settings has written them */
 void platform_display_apply(void)
 {
 #ifndef HALO_ANDROID
 	BOOL fullscreen = platform_fullscreen_setting();
-	long scale = config_integer("display.window_scale");
+	long width, height;
 
 	if (!platform_window)
 		return;
 	platform_fullscreen_kind_apply();
 	if (((SDL_GetWindowFlags(platform_window) & SDL_WINDOW_FULLSCREEN) != 0) != (fullscreen != FALSE))
 		SDL_SetWindowFullscreen(platform_window, fullscreen ? true : false);
-	if (scale != platform_window_scale && scale >= 1)
+	platform_window_size_setting(&width, &height);
+	if (width != platform_window_width || height != platform_window_height)
 	{
-		platform_window_scale = scale;
-		SDL_SetWindowSize(platform_window, (int)(640 * scale), (int)(480 * scale));
+		platform_window_width = width;
+		platform_window_height = height;
+		SDL_SetWindowSize(platform_window, (int)width, (int)height);
 	}
 #else
 	if (!platform_window)

@@ -62,6 +62,8 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height);
 #ifndef HALO_ANDROID
 BOOL platform_screen_mode(long *width, long *height);
 BOOL platform_output_size(long *width, long *height);
+int platform_display_resolutions(long *widths, long *heights, int maximum);
+int platform_window_sizes(long *widths, long *heights, int maximum);
 #endif
 /* F8: the next of the resolutions (d3d8_gl.c, display.resolution) */
 const char *halo_screen_resolution_next(void);

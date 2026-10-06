@@ -295,6 +295,36 @@ static void find_folders(void)
 		mkdir(folder, 0755);
 		snprintf(host_data_root, sizeof(host_data_root), "%s/Halo", folder);
 		mkdir(host_data_root, 0755);
+
+		/* Seed the public-lobby broker list from the application bundle.
+		Do not overwrite a player's own broker configuration. */
+		{
+			char brokers_path[PATH_MAX];
+			char bundled_brokers[PATH_MAX];
+
+			snprintf(brokers_path, sizeof(brokers_path), "%s/brokers.txt", host_data_root);
+			if (access(brokers_path, F_OK) != 0)
+			{
+				snprintf(bundled_brokers, sizeof(bundled_brokers),
+				         "%s/../Resources/brokers.txt", image_folder);
+
+				FILE *source = fopen(bundled_brokers, "rb");
+				if (source)
+				{
+					FILE *destination = fopen(brokers_path, "wb");
+					if (destination)
+					{
+						char buffer[4096];
+						size_t count;
+
+						while ((count = fread(buffer, 1, sizeof(buffer), source)) != 0)
+							fwrite(buffer, 1, count, destination);
+						fclose(destination);
+					}
+					fclose(source);
+				}
+			}
+		}
 	}
 	/* the guest's platform layer looks for its folder through
 	/proc/self/exe (host_syscall.c) */

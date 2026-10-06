@@ -980,6 +980,8 @@ static long unit_get_weapon(struct unit_datum *unit, short index);
 static void unit_drop_item(long unit_index, long item_index);
 /* port/linux/game/network_objects.c's */
 boolean network_objects_creating_host_object(void);
+/* port/linux/game/network_damage.c's */
+void network_damage_note_grenade(long unit_index, short grenade_type);
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
 static void unit_drop_grenades(
@@ -4385,8 +4387,10 @@ boolean unit_throw_grenade_begin(
 
 		default:
 			/* port: and with no weapon (a loadout of none), as melee
-			(bipeds.c), which weapon_prevents_grenade_throwing(NONE) prevents */
-			if (weapon_index == NONE || !weapon_prevents_grenade_throwing(weapon_index))
+			(bipeds.c), which weapon_prevents_grenade_throwing(NONE) prevents;
+			not from a vehicle's seat, which holds no weapon either */
+			if ((weapon_index == NONE && unit->unit.parent_seat_index == NONE) ||
+				(weapon_index != NONE && !weapon_prevents_grenade_throwing(weapon_index)))
 			{
 				struct animation_graph *animation_graph;
 				struct animation *animation;
@@ -7587,6 +7591,34 @@ boolean unit_drop_current_weapon(
 	return result;
 }
 
+/* port: a swap's weapon out: the one the player chose, though the weapon
+in hand is still being put away for it (a network player's choice gets to
+the host before the switch is done), not that one, their backup */
+boolean unit_drop_selected_weapon(
+	long unit_index)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+	short slot = unit->unit.desired_weapon_index;
+	long weapon_index = unit_inventory_get_weapon(unit_index, slot);
+
+	if (weapon_index == NONE || slot == unit->unit.current_weapon_index ||
+		TEST_FLAG(weapon_definition_get(weapon_get(weapon_index)->definition_index)->weapon.flags,
+			_weapon_doesnt_count_toward_maximum_bit))
+	{
+		return unit_drop_current_weapon(unit_index, TRUE);
+	}
+	unit_drop_item(unit_index, weapon_index);
+	unit->unit.weapon_object_indices[slot] = NONE;
+	unit->unit.desired_weapon_index = unit->unit.current_weapon_index!=NONE ?
+		unit->unit.current_weapon_index : unit_weapon_next_index(unit_index, NONE, 0);
+	if (!weapon_can_be_fired(weapon_index))
+	{
+		object_delete(weapon_index);
+	}
+
+	return TRUE;
+}
+
 /* ---------- private code */
 
 char const *base_seat_labels[NUMBER_OF_UNIT_BASE_SEATS] = {"asleep", "alert", "stand", "crouch", "flee", "flaming"};
@@ -7758,6 +7790,9 @@ static void unit_throw_grenade_move_to_hand(
 		object_attach_to_node(unit_index, object_index, marker.node_index);
 		unit->unit.grenade_object_index = object_index;
 		unit->unit.grenade_throw_state = _unit_grenade_throw_in_hand;
+		/* port: the host takes a client's report of the grenade's damage only
+		from a grenade thrown (network_damage.c) */
+		network_damage_note_grenade(unit_index, unit->unit.current_grenade_index);
 	}
 	else
 	{
@@ -8747,6 +8782,35 @@ enum
 	_collision_result_breakable_surface_bit = 3,
 };
 
+/* the globals' first multiplayer weapon, NONE where there is none: a
+campaign map's globals list no multiplayer weapons (and its player starts
+some levels unarmed, a10's), so its unarmed blow stays the game's, none */
+static long unarmed_melee_weapon_definition_index(
+	void)
+{
+	struct game_globals *game_globals = scenario_get_game_globals();
+
+	return game_globals && game_globals->weapon_list.count>0 ?
+		list_index_to_weapon_definition_index(0) : NONE;
+}
+
+/* port: the melee damage of a unit with no weapon (a gametype's loadout of
+none): its own, else (a player's biped has none: players always had a
+weapon) the blow of the globals' first multiplayer weapon, the assault
+rifle's. network_damage.c takes it as the player's. */
+long unit_unarmed_melee_damage(
+	long unit_index)
+{
+	struct unit_definition *unit_definition = unit_definition_get(unit_get(unit_index)->definition_index);
+	long weapon_definition_index;
+
+	if (unit_definition->unit.melee_damage.index!=NONE)
+		return unit_definition->unit.melee_damage.index;
+	weapon_definition_index = unarmed_melee_weapon_definition_index();
+	return weapon_definition_index!=NONE ?
+		weapon_definition_get(weapon_definition_index)->weapon.melee_attack_damage.index : NONE;
+}
+
 void unit_cause_player_melee_damage(
 	long unit_index)
 {
@@ -8914,6 +8978,20 @@ void unit_cause_player_melee_damage(
 		if (melee_damage_effect_index==NONE)
 		{
 			melee_damage_effect_index = unit_definition->unit.melee_damage.index;
+		}
+		/* port: a player with no weapon (a gametype's loadout of none), whose
+		biped has no blow of its own: unit_unarmed_melee_damage's, and its
+		response */
+		if (melee_damage_effect_index==NONE)
+		{
+			long weapon_definition_index = unarmed_melee_weapon_definition_index();
+
+			melee_damage_effect_index = unit_unarmed_melee_damage(unit_index);
+			if (weapon_definition_index!=NONE && melee_response_effect_index==NONE)
+			{
+				melee_response_effect_index =
+					weapon_definition_get(weapon_definition_index)->weapon.melee_attack_response.index;
+			}
 		}
 
 		if (best_object_index!=NONE)

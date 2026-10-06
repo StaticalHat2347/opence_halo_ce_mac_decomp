@@ -2050,6 +2050,10 @@ static boolean multiplayer_type_menu_initialize(
 	boolean *widget_deleted)
 {
 	player_spawn_count = 1;
+	/* port: and no co-op player's controller, which one player with one
+	gamepad gives back to the keyboard's (xinput_sdl.c's port_gamepad): its
+	going is not a controller unplugged (input_abstraction.c) */
+	player_ui_reset_single_player_local_player_controllers();
 	return TRUE;
 }
 
@@ -2336,6 +2340,8 @@ static boolean main_menu_initialize(
 	dispose_global_network_game_server();
 	network_game_accept_remote_connections(FALSE);
 	player_spawn_count = 1;
+	/* port: as multiplayer_type_menu_initialize */
+	player_ui_reset_single_player_local_player_controllers();
 	player_ui_end_editing_profile();
 	if (!ui_main_menu_music_active())
 		ui_start_main_menu_music();
@@ -2426,6 +2432,10 @@ static boolean network_game_remove_local_player(
 		event && event->controller_index >= 0 && event->controller_index < 4,
 		"valid controller index required to remove player from network game");
 	network_game_client_local_player_quit(event->controller_index);
+	/* port: a split screen player who quit, the others staying, is not
+	joined to the next game */
+	if (local_player_count() > 1)
+		player_ui_local_player_left_multiplayer_game(event->controller_index);
 	return TRUE;
 }
 
@@ -3965,6 +3975,13 @@ static boolean playlist_profile_change_slayer_rules(
 		case 2: *(long *)(profile + 0x40) = 15; break;
 		case 3: *(long *)(profile + 0x40) = 25; break;
 		case 4: *(long *)(profile + 0x40) = 50; break;
+		/* port: higher, for big games (ui_widget.c's kills_to_win_extra_strings) */
+		case 5: *(long *)(profile + 0x40) = 75; break;
+		case 6: *(long *)(profile + 0x40) = 100; break;
+		case 7: *(long *)(profile + 0x40) = 150; break;
+		case 8: *(long *)(profile + 0x40) = 200; break;
+		case 9: *(long *)(profile + 0x40) = 250; break;
+		case 10: *(long *)(profile + 0x40) = 500; break;
 		default: error(2, "unknown option selected in 'kills to win' option spinner list"); break;
 		}
 		list_item = list_item->next;
@@ -4882,6 +4899,13 @@ static boolean playlist_profile_initialize_slayer_rules(
 		case 15: option_spinner->data3C.selected_index = 2; break;
 		case 25: option_spinner->data3C.selected_index = 3; break;
 		case 50: option_spinner->data3C.selected_index = 4; break;
+		/* port: higher, for big games (ui_widget.c's kills_to_win_extra_strings) */
+		case 75: option_spinner->data3C.selected_index = 5; break;
+		case 100: option_spinner->data3C.selected_index = 6; break;
+		case 150: option_spinner->data3C.selected_index = 7; break;
+		case 200: option_spinner->data3C.selected_index = 8; break;
+		case 250: option_spinner->data3C.selected_index = 9; break;
+		case 500: option_spinner->data3C.selected_index = 10; break;
 		default: option_spinner->data3C.selected_index = 0; break;
 		}
 
@@ -5981,12 +6005,18 @@ boolean ui_widget_port_gametype_choose(
 	return TRUE;
 }
 
-/* hosting (as the Xbox's server list's Y) */
+/* hosting (as the Xbox's server list's Y): always a new game. A game made
+before and backed out of keeps its server (the lobby's last player leaving
+pauses it: netgame_unjoin_player), and network_game_start_new_server joins
+only a server it makes, so the client it made for that one never joined it
+and the lobby had nobody in it */
 boolean ui_widget_port_host(
 	struct widget_instance *widget,
 	struct event_record *event,
 	boolean *widget_deleted)
 {
+	dispose_global_network_game_client();
+	dispose_global_network_game_server();
 	return network_game_start_new_server(widget, event, widget_deleted);
 }
 
@@ -6072,6 +6102,22 @@ boolean ui_widget_port_multiplayer_player(
 	player_ui_set_active_player_profile(controller_index, profile_index, &profile);
 	player_ui_local_player_joined_multiplayer_game(controller_index);
 	return TRUE;
+}
+
+/* the lobby's B of a player (port/linux/game/menu_functions.c): that
+controller's player leaves the game (netgame_unjoin_player); TRUE if they were
+the machine's last, which leaves it (and are joined again if its host's
+lobby comes back), else they leave the next game too */
+boolean ui_widget_port_unjoin_player(
+	struct widget_instance *widget,
+	struct event_record *event,
+	boolean *widget_deleted)
+{
+	boolean left = netgame_unjoin_player(widget, event, widget_deleted);
+
+	if (!left && event && event->controller_index >= 0 && event->controller_index < MAXIMUM_NUMBER_OF_LOCAL_PLAYERS)
+		player_ui_local_player_left_multiplayer_game(event->controller_index);
+	return left;
 }
 
 /* a screen by name in place of the widget's (back returns to it: as

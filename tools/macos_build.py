@@ -439,7 +439,10 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
     game_cflags = " ".join([
         guest_abi, guest_code, " ".join(game_flags),
         f"-include {prefix_header}", f"-include {semantics_header}",
-        f"-I{LINUX_DIR}/include", game_defines_and_includes(config), *libc_includes, f"-idirafter {XDK_INCLUDE}",
+        f"-I{LINUX_DIR}/include",
+        # Headers of the port's own game units, used by newer co-op/netcode sources.
+        f"-iquote {Path(config['game_sources'])}",
+        game_defines_and_includes(config), *libc_includes, f"-idirafter {XDK_INCLUDE}",
     ])
     for source in game_sources(config):
         cflags = game_cflags
@@ -455,7 +458,9 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         guest_abi, guest_code, "-std=gnu11", "-D_GNU_SOURCE", "-DHALO_LINUX_PLATFORM_LAYER", "-w",
         f"-include {prefix_header}", f"-include {platform_semantics_header}",
         f"-I{LINUX_DIR}/src", f"-I{LINUX_DIR}/include", runtime_dirs,
-        f"-I{TOML_DIR}", f"-I{EXPAT_DIR}", f"-I{KCP_DIR}", "-Isource -Isource/cseries",
+        f"-I{TOML_DIR}", f"-I{EXPAT_DIR}", f"-I{KCP_DIR}",
+        '-Iport/third_party/monocypher',
+        "-Isource -Isource/cseries",
         f"-I{SDL_DIR}/include", f"-I{KHRONOS_DIR}", *libc_includes, f"-idirafter {XDK_INCLUDE}",
     ])
     # replaced by the guest runtime (memory_watch.c) or not part of the
@@ -474,6 +479,11 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         objects.append(guest_object(EXPAT_DIR / name, platform_cflags))
     objects.append(guest_object(TOML_DIR / "tomlc17.c", platform_cflags))
     objects.append(guest_object(KCP_DIR / "ikcp.c", platform_cflags))
+
+    # Ed25519/signing for public server-browser listings.
+    monocypher_dir = Path("port/third_party/monocypher")
+    for name in ("monocypher.c", "monocypher-ed25519.c"):
+        objects.append(guest_object(monocypher_dir / name, platform_cflags))
     musl_math_cflags = " ".join([
         guest_abi, "-std=gnu11", "-w", *libc_includes, f"-I{MUSL_MATH_DIR}/include",
         f"-include {MUSL_MATH_DIR}/include/libm.h",
@@ -574,6 +584,13 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         # the guest image is data to macOS: Resources, not MacOS (signing)
         n.build(outputs=bundle / "Resources" / image.name, rule="macos_copy", inputs=image)
         bundle_files.append(bundle / "Resources" / image.name)
+
+        # Default public-lobby MQTT brokers. host_main.c seeds this into the
+        # writable Halo data directory on first launch.
+        bundled_brokers = bundle / "Resources" / "brokers.txt"
+        n.build(outputs=bundled_brokers, rule="macos_copy",
+                inputs=Path("port/assets/network/brokers.txt"))
+        bundle_files.append(bundled_brokers)
         n.build(outputs=bundle / "Info.plist", rule="macos_copy", inputs=PORT_DIR / "Info.plist")
         n.build(outputs=bundle / "Resources" / "halo.icns", rule="macos_icon", inputs=PORT_DIR / "Info.plist",
                 implicit=[Path("port/android/art")])

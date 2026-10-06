@@ -314,6 +314,8 @@ void network_objects_handle_changes(void const *entries, short count);
 void network_objects_handle_synchronized(void);
 void network_objects_handle_states(void const *entries, short count);
 void network_objects_handle_inventories(void const *entries, short count);
+/* (a client) its own player picked up the weapon, to ready once its unit has it */
+void network_objects_client_picked_up_weapon(short local_player_index, long unit_index, long definition_index);
 void network_objects_handle_vehicle_prediction(long machine_index, void const *entries, short count);
 /* (the host) the vehicle predictions come in since the last tick, taken */
 void network_objects_apply_vehicle_predictions(void);
@@ -337,6 +339,9 @@ short network_objects_send_period(long machine_index, real_point3d const *positi
 /* ---------- prototypes/NETWORK_DAMAGE.C */
 
 void network_damage_new_game(void);
+/* the host: a grenade a player's unit threw (units.c), whose damage that
+player's machine reports */
+void network_damage_note_grenade(long unit_index, short grenade_type);
 void network_damage_host_tick(void);
 void network_damage_client_tick(void);
 void network_damage_handle_events(void const *entries, short count);
