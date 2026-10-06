@@ -54,6 +54,9 @@ const char *halo_startup_map_command(void);
 /* the next of debug.commands (HALO_COMMANDS) whose time has come, or NULL
 (port/linux/src/port_config.c) */
 const char *halo_timed_command_next(void);
+/* names a model lighting vertex program, whose draws can be lit for each
+pixel (port/linux/src/d3d8_gl.c, display.per_pixel_lighting) */
+void halo_vertex_shader_lighting(unsigned long handle);
 /* the mouse in the menus (source/interface/ui_widget.c) */
 #include "halo_ui_pointer.h"
 
