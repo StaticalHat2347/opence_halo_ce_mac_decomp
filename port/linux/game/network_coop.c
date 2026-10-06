@@ -1517,7 +1517,19 @@ static void client_watch_host_from_behind(
 	up->i = 0.0f;
 	up->j = 0.0f;
 	up->k = 1.0f;
-	distributed_axes_make_valid(forward, up);
+	if (!distributed_axes_make_valid(forward, up))
+	{
+		/* A nearly vertical host view cannot use the fixed upright axis.
+		 * Fall back to the horizontal direction used to position the
+		 * spectator camera, keeping the scripted camera command valid. */
+		*forward = level;
+		if (normalize3d(forward) == 0.0f)
+		{
+			forward->i = 1.0f;
+			forward->j = 0.0f;
+			forward->k = 0.0f;
+		}
+	}
 }
 
 /* client: looks through the host's camera, or with its own */
