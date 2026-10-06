@@ -43,6 +43,9 @@ long halo_screen_width(void);
 float halo_screen_scale(void);
 /* takes up a new width between frames (F11); returns the width */
 long halo_screen_commit(void);
+/* the shadow maps' pixels for each of their 128 texels each way, a power of
+two (display.shadow_resolution) */
+long halo_shadow_map_scale(void);
 /* while TRUE, drawing shifts right to center 640-column layouts */
 void halo_screen_ui_offset(unsigned char centered);
 /* the console command that starts game.map (HALO_MAP), or NULL
