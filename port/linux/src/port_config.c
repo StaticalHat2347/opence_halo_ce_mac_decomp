@@ -75,10 +75,23 @@ static const struct config_setting config_settings[] =
 	{ "display.fullscreen", _config_boolean, "true", "HALO_FULLSCREEN", _environment_value, _platform_desktop,
 		"Start fullscreen, in the display's shape; false starts in a window, in\n"
 		"the window's shape. display.resolution sets the pixels. F11 switches." },
+	{ "display.mode", _config_string, "\"\"", "HALO_DISPLAY_MODE", _environment_value, _platform_desktop,
+		"\"fullscreen\" takes the display (at display.resolution's mode),\n"
+		"\"borderless\" is a window over the whole desktop, \"windowed\" a window\n"
+		"(display.window_size). Empty: display.fullscreen's (true: borderless).\n"
+		"F11 switches to the window and back." },
 	{ "display.resolution", _config_string, "\"native\"", "HALO_RESOLUTION", _environment_value, _platform_desktop,
 		"The picture's pixels: \"native\" (the display's in fullscreen, the window's\n"
 		"in a window), \"720p\", \"1080p\", \"1440p\", \"2160p\", \"<width>x<height>\",\n"
 		"or \"xbox\" for the Xbox's 640x480. F8 steps through them while playing." },
+	{ "display.resolution_scaling", _config_string, "\"native\"", "HALO_RESOLUTION_SCALING", _environment_value,
+		_platform_desktop,
+		"\"native\" draws at the window's resolution (fullscreen, the display's or\n"
+		"display.resolution); \"original\" draws the Xbox's 640x480 and scales it\n"
+		"up." },
+	{ "display.window_size", _config_string, "\"\"", "HALO_WINDOW_SIZE", _environment_value, _platform_desktop,
+		"The window's size, \"<width>x<height>\" (\"1920x1080\"), 640x480 or more (it\n"
+		"can be resized). Empty: display.window_scale's." },
 	{ "display.render_scale", _config_real, "1.0", "HALO_RENDER_SCALE", _environment_value, _platform_desktop,
 		"Multiplies the resolution: below 1.0 draws fewer pixels (faster),\n"
 		"above 1.0 more (supersampling, smoother edges); up to 4.0." },
@@ -106,22 +119,6 @@ static const struct config_setting config_settings[] =
 		"In first person, point the view where the player aims now instead of\n"
 		"where the last tick left it: the view turns the frame the mouse moves,\n"
 		"not up to two ticks (66 ms) later." },
-	{ "display.high_res_hud", _config_boolean, "true", "HALO_HIGH_RES_HUD", _environment_value, _platform_all,
-		"Draw the HUD (meters, counters, panels, motion sensor, reticles,\n"
-		"waypoints, scopes) from the high-res assets (8x the maps' bitmaps);\n"
-		"false draws the maps' own bitmaps." },
-	{ "display.high_res_text", _config_boolean, "true", "HALO_HIGH_RES_TEXT", _environment_value, _platform_all,
-		"Draw the menus' and HUD's text with the fonts in port/assets/fonts\n"
-		"(Overpass) at the display's resolution, and the menus' titles from\n"
-		"port/assets/titles; false draws the maps' bitmap fonts and titles." },
-	{ "display.player_names", _config_string, "\"all\"", "HALO_PLAYER_NAMES", _environment_value, _platform_all,
-		"In multiplayer, whose names are drawn above their heads: \"all\",\n"
-		"\"allies\", \"enemies\" or \"none\". An enemy's shows only while in sight\n"
-		"and not camouflaged." },
-	{ "display.player_name_scale", _config_real, "1.0", "HALO_PLAYER_NAME_SCALE", _environment_value, _platform_all,
-		"How large the players' names are drawn: 1.0 the size of the HUD's text,\n"
-		"0.25 to 4." },
-
 
 	{ "display.show_fps", _config_boolean, "false", "HALO_SHOW_FPS", _environment_value, _platform_desktop,
 		"Show the game's frames-a-second counter (F7, or Command-P on a Mac,\n"
@@ -168,7 +165,6 @@ static const struct config_setting config_settings[] =
 		"of each vertex shows across curved surfaces; false lights each vertex,\n"
 		"as the Xbox does." },
 
-
 	{ "audio.enabled", _config_boolean, "true", "HALO_NO_AUDIO", _environment_set_is_false, _platform_all,
 		"Play sound." },
 	{ "audio.volume", _config_real, "1.0", "HALO_VOLUME", _environment_value, _platform_all,
@@ -196,7 +192,6 @@ static const struct config_setting config_settings[] =
 		_platform_desktop,
 		"How far the view turns up and down for the mouse's movement; 0 for the\n"
 		"same as input.mouse_sensitivity." },
-
 
 	/* the keyboard and mouse's own controls (port/linux/src/xinput_sdl.c) */
 	{ "controls.move_forward", _config_string, "\"W\"", "HALO_KEY_MOVE_FORWARD", _environment_value, _platform_all,
@@ -253,7 +248,6 @@ static const struct config_setting config_settings[] =
 		"asserts that stop the game), \"all\" (every line, the game's own\n"
 		"chatter too), or \"none\" (the asserts that stop the game only). What\n"
 		"a command prints shows whatever this is, and debug.txt has every line." },
-
 
 	{ "game.language", _config_string, "\"\"", "HALO_LANGUAGE", _environment_value, _platform_all,
 		"The language the game asks the Xbox for: \"ja\", \"de\", \"fr\", \"es\" or \"it\";\n"

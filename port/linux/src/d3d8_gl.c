@@ -231,7 +231,7 @@ static int anti_aliasing(void)
 
 static void screen_mode_choose(long *width, float scale[2])
 {
-#ifdef HALO_GLES
+#ifdef HALO_ANDROID
 	/* display.screen_width, or 0 for the display's shape, which the app
 	passes (port/android/host/host_main.c) */
 	const char *display = getenv("HALO_DISPLAY_WIDTH");
