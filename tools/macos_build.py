@@ -459,7 +459,7 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         f"-include {prefix_header}", f"-include {platform_semantics_header}",
         f"-I{LINUX_DIR}/src", f"-I{LINUX_DIR}/include", runtime_dirs,
         f"-I{TOML_DIR}", f"-I{EXPAT_DIR}", f"-I{KCP_DIR}",
-        '-Iport/third_party/monocypher',
+        '-Iport/third_party/monocypher', '-Iport/third_party/zlib',
         "-Isource -Isource/cseries",
         f"-I{SDL_DIR}/include", f"-I{KHRONOS_DIR}", *libc_includes, f"-idirafter {XDK_INCLUDE}",
     ])
@@ -484,6 +484,13 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
     monocypher_dir = Path("port/third_party/monocypher")
     for name in ("monocypher.c", "monocypher-ed25519.c"):
         objects.append(guest_object(monocypher_dir / name, platform_cflags))
+
+    # Build 138: use the port's prefixed zlib for maps, PNGs and updates.
+    zlib_dir = Path("port/third_party/zlib")
+    zlib_cflags = platform_cflags + " -DZ_PREFIX -Dz_errmsg=z_port_errmsg"
+    for name in ("adler32.c", "crc32.c", "inffast.c", "inflate.c",
+                 "inftrees.c", "uncompr.c", "zutil.c"):
+        objects.append(guest_object(zlib_dir / name, zlib_cflags))
     musl_math_cflags = " ".join([
         guest_abi, "-std=gnu11", "-w", *libc_includes, f"-I{MUSL_MATH_DIR}/include",
         f"-include {MUSL_MATH_DIR}/include/libm.h",
