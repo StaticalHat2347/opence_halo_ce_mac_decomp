@@ -887,6 +887,11 @@ long postgame_statistic_get_rating(
 	enum postgame_statistic statistic,
 	boolean inverse);
 
+/* port: the in-game scoreboard's lists (game_engine_rasterize_scoreboard,
+game_engine_rasterize_in_game_score): the players in the game, not those who
+quit, ranked and placed among themselves */
+static boolean statistic_buffer_in_game_only = FALSE;
+
 long populate_statistic_buffer(
 	struct statistic_buffer *statistic_buffer,
 	enum postgame_statistic statistic,
@@ -1475,6 +1480,8 @@ long populate_statistic_buffer(
 			"c:\\halo\\SOURCE\\game\\game_engine.c",
 			0x2C8,
 			player_count < MULTIPLAYER_MAXIMUM_PLAYERS);
+		if (statistic_buffer_in_game_only && player->quit_out_of_game)
+			continue;
 		if (player_count < MULTIPLAYER_MAXIMUM_PLAYERS)
 		{
 			statistic_buffer[player_count].player_index = player_iterator.datum_index;
