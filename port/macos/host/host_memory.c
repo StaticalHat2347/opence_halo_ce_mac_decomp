@@ -66,6 +66,12 @@ static pthread_mutex_t memory_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t window_base, window_end;
 static uint64_t image_base, image_end;
 
+/* Halo Custom Edition maps link their tag cache at this fixed guest
+address. Keep the range out of the macOS host's general guest allocator so
+the guest can later map it with MAP_FIXED_NOREPLACE. */
+#define CUSTOM_EDITION_TAG_CACHE_BASE 0x40440000ULL
+#define CUSTOM_EDITION_TAG_CACHE_SIZE 0x01700000ULL
+
 size_t host_guest_page_size(void)
 {
 	return PAGE;
@@ -174,6 +180,7 @@ int host_memory_initialize(uint32_t base, uint32_t size)
 	pthread_mutex_lock(&memory_lock);
 	mark(window_base, HALO_GUEST_WINDOW_SIZE, 1);
 	mark(image_base, image_end - image_base, 1);
+	mark(CUSTOM_EDITION_TAG_CACHE_BASE, CUSTOM_EDITION_TAG_CACHE_SIZE, 1);
 	search_hint = image_end;
 	pthread_mutex_unlock(&memory_lock);
 	host_logf(HOST_LOG_INFO, "guest memory at %016llx, %llu KB pages", (unsigned long long)host_guest_base,
