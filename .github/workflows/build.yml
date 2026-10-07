@@ -67,8 +67,9 @@ jobs:
         run: python tools/ci_build.py linux release
 
       - name: Test
-        run: python -m pytest -q tools/test_linux_port.py
-
+run: |
+          python -m pytest -q tools/test_linux_port.py tools/harness
+          python tools/test_light_storage.py
       - name: Compile cache
         run: ccache --show-stats
 
