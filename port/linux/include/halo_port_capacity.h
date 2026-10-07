@@ -46,7 +46,7 @@ measurement). The desktop builds' cache is 256 MB, half their 512 MB memory
 window (port/linux/src/platform.h), whose pages are backed as they are used.
 Android's window is 128 MB, and its cache the Xbox's. */
 
-#ifdef HALO_ANDROID
+#if defined(HALO_ANDROID) || defined(HALO_MACOS)
 #define HALO_PORT_TEXTURE_CACHE_PAGE_COUNT 0x580 /* (0x580) */
 #else
 #define HALO_PORT_TEXTURE_CACHE_PAGE_COUNT 0x4000 /* (0x580) */

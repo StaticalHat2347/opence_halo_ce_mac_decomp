@@ -120,15 +120,12 @@ that window at start-up and hands out page-granular blocks from it, so the
 physical/virtual arithmetic the game and Direct3D rely on keeps working. */
 
 #define PLATFORM_CONTIGUOUS_BASE 0x80000000UL
-#ifdef HALO_ANDROID
-/* 128 MB, a development kit's: Android's guest image is linked just above
-the window (port/android/include/halo_android_abi.h) */
+#if defined(HALO_ANDROID) || defined(HALO_MACOS)
+/* Android and macOS use the 128 MB contiguous window. macOS cannot reserve
+the expanded fixed 0x80000000-0xA0000000 desktop window. */
 #define PLATFORM_CONTIGUOUS_SIZE 0x08000000UL
 #else
-/* 512 MB on the desktop builds, whose caches outgrow the Xbox's (Custom
-Edition maps' textures and geometry: halo_port_capacity.h). Its pages are
-backed as they are used. port/windows/src/win32_memory_watch.c has the
-same size. */
+/* 512 MB on desktop platforms that can reserve the expanded fixed window. */
 #define PLATFORM_CONTIGUOUS_SIZE 0x20000000UL
 #endif
 #define PLATFORM_ANY_PHYSICAL_ADDRESS 0xffffffffUL
