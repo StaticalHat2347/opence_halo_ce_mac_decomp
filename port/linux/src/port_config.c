@@ -253,10 +253,12 @@ static const struct config_setting config_settings[] =
 		"The language the game asks the Xbox for: \"ja\", \"de\", \"fr\", \"es\" or \"it\";\n"
 		"empty for English. The game data decides what is translated." },
 	{ "game.custom_edition", _config_boolean, "true", "HALO_CUSTOM_EDITION", _environment_value, _platform_all,
-		"Load and run Halo Custom Edition maps (not OpenSauce ones): put them\n"
-		"and Custom Edition's bitmaps.map, sounds.map and loc.map in the maps\n"
-		"folder. Their tags are checked as the game's own maps' are before they\n"
-		"run; false refuses them (docs/custom_edition_caches.md)." },
+		"Load and run Halo Custom Edition maps (not those that need OpenSauce):\n"
+		"put them and Custom Edition's bitmaps.map, sounds.map and loc.map in\n"
+		"the custom_maps folder beside the maps folder; the map lists show them\n"
+		"as CUSTOM SINGLEPLAYER and CUSTOM MULTIPLAYER. Their tags are checked\n"
+		"as the game's own maps' are before they run; false refuses them\n"
+		"(docs/custom_edition_caches.md)." },
 
 	{ "paths.data", _config_string, "\"\"", "HALO_DATA_ROOT", _environment_value, _platform_desktop,
 		"The folder holding the game data's maps folder; empty looks in the\n"
@@ -267,9 +269,9 @@ static const struct config_setting config_settings[] =
 			"(~/.local/share/halo-linux, %APPDATA%\\halo on Windows,\n"
 			"~/Library/Application Support/Halo on macOS)." },
 	{ "paths.custom_edition", _config_string, "\"\"", "HALO_CUSTOM_EDITION_ROOT", _environment_value, _platform_desktop,
-			"A Halo Custom Edition install whose maps folder is looked in after the\n"
-			"game's for Custom Edition maps and their bitmaps.map, sounds.map and\n"
-			"loc.map (game.custom_edition); empty for none." },
+		"A Halo Custom Edition install whose maps folder is looked in after the\n"
+		"custom_maps folder for Custom Edition maps and their bitmaps.map,\n"
+		"sounds.map and loc.map (game.custom_edition); empty for none." },
 
 	{ "network.address", _config_string, "\"\"", "HALO_NET_ADDRESS", _environment_value, _platform_all,
 		"This machine's IPv4 address for system link, for a machine on several\n"
