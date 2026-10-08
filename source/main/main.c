@@ -393,7 +393,7 @@ symbols in this file:
 #include "tag_files/files.h"
 #include "custom_edition_cache.h" /* port: custom_edition_level_name */
 
-#if defined(HALO_WINDOWS) || defined(HALO_ANDROID) || defined(__linux__)
+#if defined(HALO_WINDOWS) || defined(HALO_ANDROID) || defined(HALO_MACOS) || defined(__linux__)
 #define HALO_NATIVE_BUILD_INFO 1
 #ifndef HALO_BUILD_NUMBER
 #define HALO_BUILD_NUMBER 0
@@ -1704,6 +1704,8 @@ static void main_native_build_label(char *label, size_t capacity)
 	platform = "Android";
 	#elif defined(HALO_WINDOWS)
 	platform = "Windows";
+	#elif defined(HALO_MACOS)
+	platform = "macOS";
 	#else
 	platform = "Linux";
 	#endif
