@@ -4799,16 +4799,17 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		xgpu_gl_state_invalidate();
 		xgpu_texture_cache_begin_frame();
 #ifdef HALO_GLES
-	if (xgpu_capabilities.atomic_counters)
-	{
-		/* Snapshot this frame's counters before its GPU fence. */
-		glBindBuffer(GL_COPY_READ_BUFFER, device.visibility_counters);
-		glBindBuffer(GL_COPY_WRITE_BUFFER, device.counter_snapshots[device.buffer_ring]);
-		glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
-			VISIBILITY_TEST_SLOTS * sizeof(GLuint));
-		glBindBuffer(GL_COPY_READ_BUFFER, 0);
-		glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-	}
+		if (xgpu_capabilities.atomic_counters)
+		{
+			/* Make shader counter writes visible before copying. */
+			glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+			glBindBuffer(GL_COPY_READ_BUFFER, device.visibility_counters);
+			glBindBuffer(GL_COPY_WRITE_BUFFER, device.counter_snapshots[device.buffer_ring]);
+			glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0,
+				VISIBILITY_TEST_SLOTS * sizeof(GLuint));
+			glBindBuffer(GL_COPY_READ_BUFFER, 0);
+			glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+		}
 		host_gl_fence_frame((unsigned int)device.buffer_ring);
 		device.buffer_ring = (device.buffer_ring + 1) % STREAM_BUFFER_RING;
 		host_gl_wait_frame((unsigned int)device.buffer_ring);
