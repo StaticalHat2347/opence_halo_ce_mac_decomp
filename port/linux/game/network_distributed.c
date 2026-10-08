@@ -4071,6 +4071,20 @@ void network_distributed_handle_message(
 
 		/* (its count 1: the client asks again, having failed to make one of
 		the host's objects) */
+		/* Give a joining co-op client the current BSP before its
+		   object snapshot, including when the host has not switched
+		   BSPs recently. */
+		if (loaded && network_coop_active())
+		{
+			struct distributed_structure_bsp_message bsp_message;
+			bsp_message.structure_bsp.structure_bsp_index =
+				global_structure_bsp_index_get();
+			bsp_message.structure_bsp.pad = 0;
+			distributed_send_to_machine_reliably(
+				machine_index, &bsp_message,
+				_distributed_message_structure_bsp, 1,
+				(word)sizeof(bsp_message));
+		}
 		network_objects_client_asked(machine_index, header.count != 0);
 		/* (a machine new at its index, which may have joined the game in
 		progress: every player's statistics and the game type's state, after
