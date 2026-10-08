@@ -67,7 +67,7 @@ HOST_FRAMEWORKS = ["Cocoa", "Metal", "QuartzCore", "IOKit"]
 # NEON's lanes round as scalar instructions do.
 NATIVE_ABI_FLAGS = [("-mcpu=apple-m1" if flag == "-mcpu=cortex-a53" else flag)
                     for flag in ANDROID_ABI_FLAGS if flag != "-DHALO_ANDROID=1"] + [
-    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=152", '-DHALO_BUILD_FLAVOR=\\"custom\\"', "-ffixed-x27", "-ffixed-x28",
+    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=157", '-DHALO_BUILD_FLAVOR=\\"custom\\"', "-ffixed-x27", "-ffixed-x28",
     # the rebasing lengthens functions past what byte-sized jump table
     # entries reach
     "-mllvm", "-aarch64-enable-compress-jump-tables=false",
@@ -81,7 +81,7 @@ NATIVE_ABI_FLAGS = [("-mcpu=apple-m1" if flag == "-mcpu=cortex-a53" else flag)
 X86_IMAGE_BASE = 0x20000000
 X86_ABI_FLAGS = [
     "--target=x86_64-linux-gnux32",
-    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=152", '-DHALO_BUILD_FLAVOR=\\"custom\\"',
+    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=157", '-DHALO_BUILD_FLAVOR=\\"custom\\"',
     f"-DHALO_GUEST_IMAGE_BASE=0x{X86_IMAGE_BASE:08x}u",
     # what Rosetta 2 translates
     "-march=x86-64-v2",
