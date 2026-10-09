@@ -598,6 +598,12 @@ def main() -> None:
              " (NON_HANDDRAWN.md; tools/ce_menus.py) -->", "<menus>"]
     lines += [art.bitmap(tag) for tag in sorted(bitmaps)]
     lines += [art.title(name, text) for name, text in sorted(port_settings.TITLES.items())]
+    # (voice chat's speaker, of a player who talks and of one muted: Lucide's
+    # icons, port/assets/icons/lucide, white for network_voice.c to tint)
+    lines.append(art.port_picture("voice/speaker", [
+        ((ROOT / "port/assets/icons/lucide" / f"{icon}.svg").read_text().replace('stroke="currentColor"',
+                                                                                 'stroke="#FFFFFF"'), 24, 24)
+        for icon in ("volume-2", "volume-x")]))
     lines.append("</menus>")
     (CE / "bitmaps.xml").write_text("\n".join(lines) + "\n")
     # what is not hand-drawn
