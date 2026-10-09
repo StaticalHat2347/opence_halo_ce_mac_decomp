@@ -782,6 +782,11 @@ boolean network_game_create_game_objects(
 		/* port: and its PC options */
 		game_set_game_variant_options(&game->variant_options);
 	}
+	else
+	{
+		/* Campaign co-op has no multiplayer game engine. */
+		game_set_game_variant(NULL);
+	}
 
 	if (game_load(&options))
 	{
