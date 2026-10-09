@@ -9,6 +9,7 @@ controller emulation (see sdl_platform.c).
 #define __HALO_LINUX_SDL_PLATFORM_H
 
 #include <SDL3/SDL_scancode.h>
+#include <SDL3/SDL_audio.h>
 #include <stddef.h>
 
 #define PLATFORM_MOUSE_BUTTON_COUNT 8
@@ -67,6 +68,12 @@ int platform_window_sizes(long *widths, long *heights, int maximum);
 #endif
 /* F8: the next of the resolutions (d3d8_gl.c, display.resolution) */
 const char *halo_screen_resolution_next(void);
+
+/* Settings > Audio: available playback and recording devices. */
+#define PLATFORM_AUDIO_DEVICE_NAME_SIZE 128
+int platform_audio_devices(int recording, char (*names)[PLATFORM_AUDIO_DEVICE_NAME_SIZE], int maximum);
+SDL_AudioDeviceID platform_audio_device(int recording, const char *name);
+
 void platform_video_drawable_size(int *width, int *height);
 /* the window's mode and size and V-Sync, from config.toml as Settings has
 just written it (the main thread's) */
