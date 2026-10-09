@@ -67,7 +67,7 @@ HOST_FRAMEWORKS = ["Cocoa", "Metal", "QuartzCore", "IOKit"]
 # NEON's lanes round as scalar instructions do.
 NATIVE_ABI_FLAGS = [("-mcpu=apple-m1" if flag == "-mcpu=cortex-a53" else flag)
                     for flag in ANDROID_ABI_FLAGS if flag != "-DHALO_ANDROID=1"] + [
-    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=157", '-DHALO_BUILD_FLAVOR=\\"custom\\"', "-ffixed-x27", "-ffixed-x28",
+    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=159", '-DHALO_BUILD_FLAVOR=\\"custom\\"', "-ffixed-x27", "-ffixed-x28",
     # the rebasing lengthens functions past what byte-sized jump table
     # entries reach
     "-mllvm", "-aarch64-enable-compress-jump-tables=false",
@@ -81,7 +81,7 @@ NATIVE_ABI_FLAGS = [("-mcpu=apple-m1" if flag == "-mcpu=cortex-a53" else flag)
 X86_IMAGE_BASE = 0x20000000
 X86_ABI_FLAGS = [
     "--target=x86_64-linux-gnux32",
-    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=157", '-DHALO_BUILD_FLAVOR=\\"custom\\"',
+    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=159", '-DHALO_BUILD_FLAVOR=\\"custom\\"',
     f"-DHALO_GUEST_IMAGE_BASE=0x{X86_IMAGE_BASE:08x}u",
     # what Rosetta 2 translates
     "-march=x86-64-v2",
@@ -479,6 +479,20 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         objects.append(guest_object(EXPAT_DIR / name, platform_cflags))
     objects.append(guest_object(TOML_DIR / "tomlc17.c", platform_cflags))
     objects.append(guest_object(KCP_DIR / "ikcp.c", platform_cflags))
+
+    # Build 159: Opus codec for multiplayer voice chat.
+    opus_dir = Path("port/third_party/opus")
+    opus_cflags = " ".join([
+        guest_abi, "-std=gnu11", "-O2",
+        "-DOPUS_BUILD", "-DVAR_ARRAYS", "-DHAVE_LRINTF", "-DHAVE_LRINT",
+        *libc_includes,
+        *(f"-I{opus_dir / name}" for name in
+          ("include", "celt", "silk", "silk/float")),
+        "-w",
+    ])
+    for line in (opus_dir / "sources.txt").read_text().splitlines():
+        if line.strip():
+            objects.append(guest_object(opus_dir / line.strip(), opus_cflags))
 
     # Ed25519/signing for public server-browser listings.
     monocypher_dir = Path("port/third_party/monocypher")

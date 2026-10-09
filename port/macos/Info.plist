@@ -37,6 +37,8 @@
 	<true/>
 	<key>GCSupportsControllerUserInteraction</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Halo uses your microphone for multiplayer voice chat.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Halo finds and joins system link games on your local network.</string>
 </dict>

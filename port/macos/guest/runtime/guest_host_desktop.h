@@ -41,6 +41,9 @@ int host_sdl_show_message_box(unsigned int flags, const char *title, const char 
 void host_sdl_show_open_file_dialog(const char *filters, int count);
 int host_sdl_file_dialog_result(char *buffer, unsigned int size);
 
+int host_sdl_audio_devices(int recording, unsigned int *ids, int maximum);
+void host_sdl_audio_device_name(unsigned int device, char *buffer, unsigned int size);
+
 /* Asynchronous community Server Browser directory request. */
 void host_server_browser_fetch(void);
 int host_server_browser_result(char *buffer, unsigned int size);

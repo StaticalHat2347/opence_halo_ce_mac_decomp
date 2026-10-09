@@ -22,6 +22,50 @@ and with structures that hold pointers passed as their parts.
 #include "guest_host.h"
 #include "guest_host_desktop.h"
 
+/* Build 159: audio-device enumeration through the macOS host. */
+static SDL_AudioDeviceID *guest_audio_devices(int recording, int *count)
+{
+    int total = host_sdl_audio_devices(recording, NULL, 0);
+    SDL_AudioDeviceID *devices;
+
+    if (count)
+        *count = 0;
+    if (total <= 0)
+        return NULL;
+
+    devices = malloc((size_t)total * sizeof(*devices));
+    if (!devices)
+        return NULL;
+
+    if (host_sdl_audio_devices(recording, (unsigned int *)devices, total) < 0)
+    {
+        free(devices);
+        return NULL;
+    }
+
+    if (count)
+        *count = total;
+    return devices;
+}
+
+SDL_AudioDeviceID *SDL_GetAudioRecordingDevices(int *count)
+{
+    return guest_audio_devices(1, count);
+}
+
+SDL_AudioDeviceID *SDL_GetAudioPlaybackDevices(int *count)
+{
+    return guest_audio_devices(0, count);
+}
+
+const char *SDL_GetAudioDeviceName(SDL_AudioDeviceID device)
+{
+    static char name[256];
+
+    host_sdl_audio_device_name(device, name, sizeof(name));
+    return name[0] ? name : NULL;
+}
+
 /* ---------- atomics and mutexes */
 
 int SDL_SetAtomicInt(SDL_AtomicInt *a, int v)

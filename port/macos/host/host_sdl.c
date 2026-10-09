@@ -442,6 +442,58 @@ int host_sdl_resume_audio_stream_device(uint32_t stream)
 	return object ? SDL_ResumeAudioStreamDevice(object) : 0;
 }
 
+/* Build 159: microphone audio-stream bridge. */
+int host_sdl_get_audio_stream_data(uint32_t stream, void *data, int length)
+{
+    SDL_AudioStream *object = handle_get(stream, _handle_audio);
+    return object ? SDL_GetAudioStreamData(object, data, length) : -1;
+}
+
+int host_sdl_get_audio_stream_available(uint32_t stream)
+{
+    SDL_AudioStream *object = handle_get(stream, _handle_audio);
+    return object ? SDL_GetAudioStreamAvailable(object) : -1;
+}
+
+void host_sdl_destroy_audio_stream(uint32_t stream)
+{
+    SDL_AudioStream *object = handle_get(stream, _handle_audio);
+    if (!object)
+        return;
+
+    pthread_mutex_lock(&handle_lock);
+    handles[stream].type = _handle_free;
+    handles[stream].object = NULL;
+    pthread_mutex_unlock(&handle_lock);
+
+    SDL_DestroyAudioStream(object);
+}
+
+/* Build 159: enumerate host audio devices for the guest. */
+int host_sdl_audio_devices(int recording, unsigned int *ids, int maximum)
+{
+    int count = 0, index;
+    SDL_AudioDeviceID *devices = recording
+        ? SDL_GetAudioRecordingDevices(&count)
+        : SDL_GetAudioPlaybackDevices(&count);
+
+    if (maximum < 0)
+        maximum = 0;
+    if (ids)
+        for (index = 0; index < count && index < maximum; index++)
+            ids[index] = devices[index];
+
+    SDL_free(devices);
+    return count;
+}
+
+void host_sdl_audio_device_name(unsigned int device, char *buffer, unsigned int size)
+{
+    const char *name = SDL_GetAudioDeviceName((SDL_AudioDeviceID)device);
+    if (buffer && size)
+        SDL_strlcpy(buffer, name ? name : "", size);
+}
+
 /* ---------- the clipboard (internet play's invite links) */
 
 int host_sdl_set_clipboard_text(const char *text)
