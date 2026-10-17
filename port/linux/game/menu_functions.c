@@ -2877,6 +2877,9 @@ static void server_settings_update(struct widget_instance *list)
 	if (spinner)
 		*server_settings_maximum_players_index() = (short)PIN(spinner->parameters.list.selected_index, 0,
 			NUMBEROF(maximum_players) - 1);
+	if (!named(list, "op_server_name", 0))
+		goto cooperative_options;
+
 	wide_to_text(multiplayer.game_name, text, sizeof(text));
 	text_field_show(named(list, "server_name_value", 0), text, text_field_editing(row));
 	if (multiplayer.mode != _multiplayer_mode_host_internet)
@@ -2892,10 +2895,13 @@ static void server_settings_update(struct widget_instance *list)
 		gametype_setup_type(type);
 		text_set(named(list, "game_type_value", 0), type);
 	}
+cooperative_options:
 	settings_help(list);
 	{
 		boolean cooperative = hosting_cooperative();
 		short row;
+
+		visible_set(named(list, "op_coop_options", 0), cooperative);
 
 		for (row = 0; row < NUMBEROF(server_settings_gametype_rows); row++)
 			visible_set(named(list, server_settings_gametype_rows[row], 0), !cooperative);
@@ -2949,11 +2955,15 @@ static void server_settings_update(struct widget_instance *list)
 				help->parameters.text_box.string_list_index = (short)(COOPERATIVE_PLAYER_COLLISIONS_HELP + choice);
 		}
 	}
+	if (!named(list, "op_server_name", 0))
+		return;
+
 	/* LISTING (an internet game's): PUBLIC, listed in everyone's server
 	browser, or PRIVATE, for this game. Its help is its choice's */
 	visible_set(named(list, "op_listing", 0), multiplayer.mode == _multiplayer_mode_host_internet &&
 		config_boolean("network.online") && config_boolean("network.public_lobby"));
-	if ((spinner = named(list, "listing_spinner", 0)) != NULL && named(list, "op_listing", 0)->visible)
+	if ((spinner = named(list, "listing_spinner", 0)) != NULL &&
+		named(list, "op_listing", 0) && named(list, "op_listing", 0)->visible)
 	{
 		boolean public = spinner->parameters.list.selected_index == 0;
 		struct widget_instance *help = list->parameters.list.extended_description;
@@ -5606,7 +5616,8 @@ void pc_menu_game_data_function_invoke(
 		map_list_update(widget);
 	else if (!strcmp(name, "gt select list update"))
 		gametype_list_update(widget);
-	else if (!strcmp(name, "server settings update"))
+	else if (!strcmp(name, "server settings update") ||
+		!strcmp(name, "coop settings update"))
 		server_settings_update(widget);
 	else if (!strcmp(name, "port password update"))
 		password_screen_update(widget);
