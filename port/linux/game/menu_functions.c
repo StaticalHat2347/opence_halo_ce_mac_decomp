@@ -2901,6 +2901,7 @@ cooperative_options:
 		boolean cooperative = hosting_cooperative();
 		short row;
 
+		visible_set(named(list, "op_map_sharing", 0), cooperative);
 		visible_set(named(list, "op_coop_options", 0), cooperative);
 
 		for (row = 0; row < NUMBEROF(server_settings_gametype_rows); row++)
