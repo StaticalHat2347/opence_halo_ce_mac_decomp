@@ -21,6 +21,7 @@
 		<child widget="main_menu/multiplayer_type_select/server_settings/op_coop_options" x="54" y="229" />
 		<child widget="main_menu/multiplayer_type_select/server_settings/op_game_type" x="54" y="203" />
 		<child widget="main_menu/multiplayer_type_select/server_settings/op_player_options" x="54" y="229" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/op_voice_voting" x="54" y="255" />
 		<child widget="main_menu/multiplayer_type_select/server_settings/op_item_options" x="54" y="255" />
 		<child widget="main_menu/multiplayer_type_select/server_settings/op_vehicle_options" x="54" y="281" />
 		<child widget="main_menu/multiplayer_type_select/server_settings/op_indicator_options" x="54" y="307" />
@@ -236,6 +237,12 @@
 		<string text="CO-OP OPTIONS" />
 		<string text="MAP SHARING" />
 		<string text="Automatic map sharing is not available yet." />
+		<string text="VOICE AND VOTING" />
+		<string text="VOICE CHAT:" />
+		<string text="LOBBY VOICE CHAT:" />
+		<string text="VOICE QUALITY:" />
+		<string text="VOICE NEAR DISTANCE:" />
+		<string text="VOTE KICK:" />
 	</strings>
 	<strings name="main_menu/multiplayer_type_select/server_settings/help_strings">
 		<string text="" />
@@ -304,4 +311,75 @@
 		<child widget="main_menu/multiplayer_type_select/server_settings/map_sharing_label" />
 	</widget>
 	<widget name="main_menu/multiplayer_type_select/server_settings/map_sharing_label" type="text" controller="1" width="300" height="22" string_list="main_menu/multiplayer_type_select/server_settings/labels" string_index="17" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4" />
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_voting_screen" width="640" height="480" flags="pass_unhandled_to_focused_child pause_game" bitmap="bitmaps/gradient">
+		<on event="b" back="true" />
+		<on event="back" back="true" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/header_server_settings" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_voting_menu" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_voting_menu" type="column_list" width="640" height="480" flags="pass_unhandled_to_focused_child up_down_tabs_children">
+		<child widget="main_menu/multiplayer_type_select/server_settings/op_voice_mode" x="54" y="73" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/op_voice_lobby" x="54" y="103" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/op_voice_kbps" x="54" y="133" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/op_voice_proximity" x="54" y="163" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/op_votekick" x="54" y="193" />
+		<child widget="common_button_cancel" x="510" y="414" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/op_voice_mode" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_mode_label" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_mode_spinner" x="286" y="1" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_mode_label" type="text" controller="1" width="300" height="22" string_list="main_menu/multiplayer_type_select/server_settings/labels" string_index="20" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4" />
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_mode_spinner" type="spinner" top="2" width="206" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="OFF|TEAM NEAR|ANYONE NEAR|TEAM|TEAM ENEMIES NEAR" setting="network.voice_mode" values="off|team_proximity|team_enemy_proximity|team_global|team_global_enemy_proximity" font="ui\large_ui" color="#FF2896FF" align="center" text_y="4" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -13 19 -7" footer_bounds="7 208 19 214">
+		<on event="created" run="port setting load" />
+		<on event="deleted" run="port setting save" />
+		<on event="left_mouse" run="mouse spinner 1wide click" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/op_voice_lobby" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_lobby_label" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_lobby_spinner" x="286" y="1" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_lobby_label" type="text" controller="1" width="300" height="22" string_list="main_menu/multiplayer_type_select/server_settings/labels" string_index="21" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4" />
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_lobby_spinner" type="spinner" top="2" width="206" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="network.voice_lobby" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="4" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -13 19 -7" footer_bounds="7 208 19 214">
+		<on event="created" run="port setting load" />
+		<on event="deleted" run="port setting save" />
+		<on event="left_mouse" run="mouse spinner 1wide click" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/op_voice_kbps" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_kbps_label" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_kbps_spinner" x="286" y="1" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_kbps_label" type="text" controller="1" width="300" height="22" string_list="main_menu/multiplayer_type_select/server_settings/labels" string_index="22" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4" />
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_kbps_spinner" type="spinner" top="2" width="206" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="8 KBPS|12 KBPS|16 KBPS|24 KBPS|32 KBPS|48 KBPS|64 KBPS" setting="network.voice_kbps" values="8|12|16|24|32|48|64" font="ui\large_ui" color="#FF2896FF" align="center" text_y="4" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -13 19 -7" footer_bounds="7 208 19 214">
+		<on event="created" run="port setting load" />
+		<on event="deleted" run="port setting save" />
+		<on event="left_mouse" run="mouse spinner 1wide click" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/op_voice_proximity" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_proximity_label" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_proximity_spinner" x="286" y="1" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_proximity_label" type="text" controller="1" width="300" height="22" string_list="main_menu/multiplayer_type_select/server_settings/labels" string_index="23" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4" />
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_proximity_spinner" type="spinner" top="2" width="206" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="15 M|30 M|45 M|60 M|90 M|150 M" setting="network.voice_proximity" values="5|10|15|20|30|50" font="ui\large_ui" color="#FF2896FF" align="center" text_y="4" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -13 19 -7" footer_bounds="7 208 19 214">
+		<on event="created" run="port setting load" />
+		<on event="deleted" run="port setting save" />
+		<on event="left_mouse" run="mouse spinner 1wide click" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/op_votekick" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/multiplayer_type_select/server_settings/votekick_label" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/votekick_spinner" x="286" y="1" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/votekick_label" type="text" controller="1" width="300" height="22" string_list="main_menu/multiplayer_type_select/server_settings/labels" string_index="24" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4" />
+	<widget name="main_menu/multiplayer_type_select/server_settings/votekick_spinner" type="spinner" top="2" width="206" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="network.votekick" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="4" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -13 19 -7" footer_bounds="7 208 19 214">
+		<on event="created" run="port setting load" />
+		<on event="deleted" run="port setting save" />
+		<on event="left_mouse" run="mouse spinner 1wide click" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/op_voice_voting" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<on event="a" open="main_menu/multiplayer_type_select/server_settings/voice_voting_screen" />
+		<on event="start" open="main_menu/multiplayer_type_select/server_settings/voice_voting_screen" />
+		<on event="left_mouse" run="mouse emit accept event" />
+		<child widget="main_menu/multiplayer_type_select/server_settings/voice_voting_label" />
+	</widget>
+	<widget name="main_menu/multiplayer_type_select/server_settings/voice_voting_label" type="text" controller="1" width="300" height="22" string_list="main_menu/multiplayer_type_select/server_settings/labels" string_index="19" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4" />
 </menus>
