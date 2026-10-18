@@ -2767,11 +2767,8 @@ static char const *const server_settings_gametype_rows[] =
 /* Server Setup's help for co-op's FRIENDLY FIRE and EXTRA ENEMIES, by
 their choices, and EXTRA ENEMIES' PER PLAYER and MULTIPLIER (its
 help_strings, tools/port_settings.py) */
-#define COOPERATIVE_FRIENDLY_FIRE_HELP 12
-#define COOPERATIVE_EXTRA_ENEMIES_HELP 16
-#define COOPERATIVE_ENEMIES_PER_PLAYER_HELP 19
-#define COOPERATIVE_ENEMIES_MULTIPLIER_HELP 20
-#define COOPERATIVE_PLAYER_COLLISIONS_HELP 21
+#define COOPERATIVE_OPTIONS_HELP 12
+#define COOPERATIVE_VOICE_OPTIONS_HELP 13
 #define SERVER_PASSWORD_HELP 23
 
 /* co-op's EXTRA ENEMIES' choices (port_settings.COOP_ENEMIES_MODES, in this
@@ -2877,9 +2874,6 @@ static void server_settings_update(struct widget_instance *list)
 	if (spinner)
 		*server_settings_maximum_players_index() = (short)PIN(spinner->parameters.list.selected_index, 0,
 			NUMBEROF(maximum_players) - 1);
-	if (!named(list, "op_server_name", 0))
-		goto cooperative_options;
-
 	wide_to_text(multiplayer.game_name, text, sizeof(text));
 	text_field_show(named(list, "server_name_value", 0), text, text_field_editing(row));
 	if (multiplayer.mode != _multiplayer_mode_host_internet)
@@ -2895,77 +2889,31 @@ static void server_settings_update(struct widget_instance *list)
 		gametype_setup_type(type);
 		text_set(named(list, "game_type_value", 0), type);
 	}
-cooperative_options:
 	settings_help(list);
 	{
 		boolean cooperative = hosting_cooperative();
 		short row;
 
-		visible_set(named(list, "op_map_sharing", 0), cooperative);
-		visible_set(named(list, "op_coop_options", 0), cooperative);
-		visible_set(named(list, "op_voice_voting", 0), cooperative);
-
 		for (row = 0; row < NUMBEROF(server_settings_gametype_rows); row++)
 			visible_set(named(list, server_settings_gametype_rows[row], 0), !cooperative);
-		/* co-op's FRIENDLY FIRE, in their place: its help is its choice's */
-		visible_set(named(list, "op_friendly_fire", 0), cooperative);
-		if (cooperative && (spinner = named(list, "friendly_fire_spinner", 0)) != NULL)
-		{
-			short choice = (short)PIN(spinner->parameters.list.selected_index, 0,
-				NUMBEROF(cooperative_friendly_fire_modes) - 1);
-			struct widget_instance *help = list->parameters.list.extended_description;
-
-			multiplayer.cooperative_friendly_fire = cooperative_friendly_fire_modes[choice];
-			if (help && list->focused_child == named(list, "op_friendly_fire", 0))
-				help->parameters.text_box.string_list_index = (short)(COOPERATIVE_FRIENDLY_FIRE_HELP + choice);
-		}
-		/* ... and its EXTRA ENEMIES, with the row of the amount of the one
-		chosen below it (network.coop_enemies_mode and its amounts, which the
-		host reads as the game begins: coop_enemies.c) */
+		/* co-op's options in their place, rows opening their screens
+		(tools/port_settings.py's COOP_SETUP_SCREENS), each its help */
 		{
 			struct widget_instance *help = list->parameters.list.extended_description;
-			short mode = _cooperative_enemies_none;
 
-			if ((spinner = named(list, "extra_enemies_spinner", 0)) != NULL)
-			{
-				mode = (short)PIN(spinner->parameters.list.selected_index, 0,
-					NUMBER_OF_COOPERATIVE_ENEMIES_MODES - 1);
-			}
-			visible_set(named(list, "op_extra_enemies", 0), cooperative);
-			visible_set(named(list, "op_enemies_per_player", 0), cooperative && mode == _cooperative_enemies_per_player);
-			visible_set(named(list, "op_enemies_multiplier", 0), cooperative && mode == _cooperative_enemies_multiplier);
-			if (cooperative && help)
-			{
-				if (list->focused_child == named(list, "op_extra_enemies", 0))
-					help->parameters.text_box.string_list_index = (short)(COOPERATIVE_EXTRA_ENEMIES_HELP + mode);
-				else if (list->focused_child == named(list, "op_enemies_per_player", 0))
-					help->parameters.text_box.string_list_index = COOPERATIVE_ENEMIES_PER_PLAYER_HELP;
-				else if (list->focused_child == named(list, "op_enemies_multiplier", 0))
-					help->parameters.text_box.string_list_index = COOPERATIVE_ENEMIES_MULTIPLIER_HELP;
-			}
-		}
-		/* ... and its PLAYER COLLISIONS, below them: ON or OFF, its help its
-		choice's */
-		visible_set(named(list, "op_player_collisions", 0), cooperative);
-		if (cooperative && (spinner = named(list, "player_collisions_spinner", 0)) != NULL)
-		{
-			short choice = (short)PIN(spinner->parameters.list.selected_index, 0, 1);
-			struct widget_instance *help = list->parameters.list.extended_description;
-
-			multiplayer.cooperative_no_player_collisions = choice == 1;
-			if (help && list->focused_child == named(list, "op_player_collisions", 0))
-				help->parameters.text_box.string_list_index = (short)(COOPERATIVE_PLAYER_COLLISIONS_HELP + choice);
+			visible_set(named(list, "op_coop_options", 0), cooperative);
+			visible_set(named(list, "op_voice_options", 0), cooperative);
+			if (help && list->focused_child == named(list, "op_coop_options", 0))
+				help->parameters.text_box.string_list_index = COOPERATIVE_OPTIONS_HELP;
+			else if (help && list->focused_child == named(list, "op_voice_options", 0))
+				help->parameters.text_box.string_list_index = COOPERATIVE_VOICE_OPTIONS_HELP;
 		}
 	}
-	if (!named(list, "op_server_name", 0))
-		return;
-
 	/* LISTING (an internet game's): PUBLIC, listed in everyone's server
 	browser, or PRIVATE, for this game. Its help is its choice's */
 	visible_set(named(list, "op_listing", 0), multiplayer.mode == _multiplayer_mode_host_internet &&
 		config_boolean("network.online") && config_boolean("network.public_lobby"));
-	if ((spinner = named(list, "listing_spinner", 0)) != NULL &&
-		named(list, "op_listing", 0) && named(list, "op_listing", 0)->visible)
+	if ((spinner = named(list, "listing_spinner", 0)) != NULL && named(list, "op_listing", 0)->visible)
 	{
 		boolean public = spinner->parameters.list.selected_index == 0;
 		struct widget_instance *help = list->parameters.list.extended_description;
@@ -4678,6 +4626,18 @@ static struct gametype_option const gametype_options[] =
 		{ "5", "10", "15", "20", "30", "50" } },
 	/* (and the players' votes to kick: port/linux/game/network_votekick.c) */
 	{ "votekick_spinner", _option_setting, 0, 0, 2, { 0 }, "network.votekick", { "true", "false" } },
+	/* co-op's options (Server Setup's CO-OP OPTIONS: tools/port_settings.py's
+	COOP_SETUP_SCREENS; coop_enemies.c) */
+	{ "coop_friendly_fire_spinner", _option_setting, 0, 0, 4, { 0 }, "network.coop_friendly_fire",
+		{ "off", "on", "shields_only", "explosives_only" } },
+	{ "coop_extra_enemies_spinner", _option_setting, 0, 0, 3, { 0 }, "network.coop_enemies_mode",
+		{ "none", "per_player", "multiplier" } },
+	{ "coop_enemies_per_player_spinner", _option_setting, 0, 0, 5, { 0 }, "network.coop_enemies",
+		{ "25", "50", "100", "150", "200" } },
+	{ "coop_enemies_multiplier_spinner", _option_setting, 0, 0, 5, { 0 }, "network.coop_enemies_multiplier",
+		{ "2", "4", "8", "16", "32" } },
+	{ "coop_player_collisions_spinner", _option_setting, 0, 0, 2, { 0 }, "network.coop_player_collisions",
+		{ "true", "false" } },
 	/* vehicle options (the side's set and counts: vehicles_update) */
 	{ "vehicles_respawn_spinner", _option_short, OPTIONS_FIELD(vehicle_respawn_time), 0, 7,
 		{ 0, 30, 60, 90, 120, 180, 300 } },
@@ -4834,6 +4794,33 @@ static void gametype_options_each(struct widget_instance *list, boolean save)
 			else
 				spinner->parameters.list.selected_index =
 					gametype_option_index(option, gametype_option_value(option, variant, options));
+		}
+	}
+}
+
+static void setting_options_each(struct widget_instance *list, boolean save)
+{
+	struct widget_instance *row;
+
+	for (row = list->child; row; row = row->next)
+	{
+		struct widget_instance *spinner;
+
+		for (spinner = row->child; spinner; spinner = spinner->next)
+		{
+			struct gametype_option const *option = spinner->type == 2 ? gametype_option_named(spinner->name) : NULL;
+			short index;
+
+			if (!option || option->kind != _option_setting)
+				continue;
+			index = (short)PIN(spinner->parameters.list.selected_index, 0, option->count - 1);
+			if (!save)
+				spinner->parameters.list.selected_index = gametype_option_setting_index(option);
+			else if (index != gametype_option_setting_index(option) &&
+				!setting_write(option->setting, option->setting_values[index]))
+			{
+				platform_log("menus: could not set %s", option->setting);
+			}
 		}
 	}
 }
@@ -5457,6 +5444,17 @@ boolean pc_menu_event_function_invoke(
 		else if (!strcmp(name, "single prev cl item activated"))
 		{
 			item_activated(widget, event_controller(widget, event), widget_deleted);
+		}
+		else if (!strcmp(name, "port setup options init"))
+		{
+			setting_options_each(widget, FALSE);
+		}
+		else if (!strcmp(name, "port setup options save"))
+		{
+			struct widget_instance *list = gametype_options_list(widget);
+
+			if (list)
+				setting_options_each(list, TRUE);
 		}
 		else if (!strcmp(name, "port settings save"))
 		{
