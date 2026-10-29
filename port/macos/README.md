@@ -55,15 +55,18 @@ The script signs with the hardened runtime and
 
 ## Game data
 
-The game needs the `maps/` folder of the Xbox game (not the Windows game).
-Make a disc image (`.iso` or `.xiso`) of your own Xbox disc of Halo: Combat
-Evolved. A PC DVD drive cannot read an Xbox game disc: use a modified Xbox,
-or an Xbox 360 DVD drive with the Kreon firmware, and a disc image tool
-such as extract-xiso.
+The application and its releases contain no game data. The game needs the
+`maps/` folder of the Xbox game (not Halo PC or Custom Edition's maps). Make
+a disc image (`.iso` or `.xiso`) of your own legally obtained Xbox disc of
+Halo: Combat Evolved. A PC DVD drive cannot read an Xbox game disc: use a
+modified Xbox, or an Xbox 360 DVD drive with the Kreon firmware, and a disc
+image tool such as extract-xiso.
 
-1. Start the game.
-2. At the first start, the game asks for the disc image. Select it.
-3. The game extracts `maps/` (approximately 2 GB). Then the game starts.
+1. Copy the `.iso` or `.xiso` to `~/Library/Application Support/Halo/` after
+   installing `Halo.app` (or choose it in the first-start file picker).
+2. Start the game and approve the extraction.
+3. The game extracts `maps/` (approximately 2 GB) beside `config.toml`.
+   The disc image is not uploaded or included in this repository.
 
 | Build | Location of `maps/`, `config.toml`, `debug.txt` and `host.txt` |
 | --- | --- |
