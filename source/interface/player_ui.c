@@ -367,6 +367,13 @@ struct player_profile *player_ui_get_edit_player_profile(
 	return result;
 }
 
+/* port: the saved game file being edited (NONE for none) */
+long player_ui_get_edit_profile_index(
+	void)
+{
+	return player_ui_globals.edit_profile_index;
+}
+
 struct game_variant *player_ui_get_edit_playlist_profile(
 	void)
 {
@@ -578,6 +585,52 @@ void player_ui_activate_all_solo_levels(
 	return;
 }
 
+/* port: the first player's profile (the one in use, else the one last
+used, else the first, as the PC menus' campaign has it) and its name; with
+reset, its campaign progress cleared (the levels and difficulties it
+finished, the level it played last) and saved, for a profile this debug
+build had made with every level finished (player_profile_new); FALSE for
+none */
+boolean player_ui_reset_campaign_progress(
+	boolean reset,
+	wchar_t *name,
+	long name_length)
+{
+	struct player_profile profile;
+	long profile_index = player_ui_globals.local_players[0].active_profile_index;
+	boolean active = profile_index != NONE;
+
+	if (active)
+		profile = player_ui_globals.local_players[0].profile;
+	else
+	{
+		profile_index = player_ui_get_player1_last_used_profile_index();
+		if (profile_index == NONE || !player_profile_get(profile_index, &profile))
+		{
+			word count = 1;
+
+			profile_index = NONE;
+			player_profiles_enumerate_available_to_local_player_index(NONE, &count, &profile_index, FALSE);
+			if ((short)count <= 0 || profile_index == NONE || !player_profile_get(profile_index, &profile))
+				return FALSE;
+		}
+	}
+	if (name && name_length > 0)
+	{
+		ustrncpy(name, profile.player_name, name_length - 1);
+		name[name_length - 1] = 0;
+	}
+	if (reset)
+	{
+		csmemset(profile.single_player_map_flags, 0, sizeof(profile.single_player_map_flags));
+		profile.last_single_player_map_played = 0;
+		player_profile_save(profile_index, &profile);
+		if (active)
+			player_ui_globals.local_players[0].profile = profile;
+	}
+	return TRUE;
+}
+
 void player_ui_set_game_variant(
 	struct game_variant *variant)
 {
@@ -650,8 +703,10 @@ void player_ui_fast_setup_network_server(
 	game_connection_set(_game_connection_local);
 	main_set_multiplayer_map_name("");
 	player_ui_globals.multiplayer_variant_specified = FALSE;
+	/* port: the pregame screen the menus open (the port's lobby with its
+	menus loaded, as ui_widget.c opens it), not ui.map's by name */
 	if (ui_widget_load_by_name_or_tag(
-		"ui\\shell\\main_menu\\multiplayer_type_select\\connected\\pregame\\connected_pregame_screen",
+		pc_menus_screen("ui\\shell\\main_menu\\multiplayer_type_select\\connected\\pregame\\connected_pregame_screen"),
 		NONE,
 		NULL,
 		NONE,
@@ -805,6 +860,24 @@ boolean player_ui_save_profile(
 			player_profile_save(
 				player_ui_globals.edit_profile_index,
 				&player_ui_globals.edit_profile.current.player);
+			/* port: a local player playing with the profile gets its
+			changes now (its button and stick layouts, sensitivity,
+			inversion), not when the profile is next chosen */
+			{
+				short local_player_index;
+
+				for (local_player_index = 0; local_player_index < MAXIMUM_NUMBER_OF_LOCAL_PLAYERS; local_player_index++)
+				{
+					if (player_ui_globals.local_players[local_player_index].active_profile_index ==
+						player_ui_globals.edit_profile_index)
+					{
+						player_ui_set_active_player_profile(
+							local_player_index,
+							player_ui_globals.edit_profile_index,
+							&player_ui_globals.edit_profile.current.player);
+					}
+				}
+			}
 			result = TRUE;
 			break;
 
@@ -1068,6 +1141,10 @@ static void set_local_player_controls_from_player_profile(
 
 	switch (controls->button_preset)
 	{
+		/* port: a preset this build does not know (a later build's) gets
+		the standard buttons, not none, which moved start and back and
+		stopped the game (input_abstraction_update_local_player_preferences) */
+		default:
 		case _button_preset_standard:
 			preferences.game_control_to_xbox_buttons[0] = _gamepad_analog_button_a;
 			preferences.game_control_to_xbox_buttons[1] = _gamepad_analog_button_black;
@@ -1142,6 +1219,63 @@ static void set_local_player_controls_from_player_profile(
 			preferences.game_control_to_xbox_buttons[10] = _gamepad_binary_button_left_thumb;
 			preferences.game_control_to_xbox_buttons[11] = _gamepad_analog_button_b;
 			break;
+
+		/* port: the Master Chief Collection's Bumper Jumper for this game:
+		jump on the left shoulder (the Duke's white) and melee on the right
+		(its black), switching grenades on A, action and reload on B and the
+		flashlight on X */
+		case _button_preset_bumper_jumper:
+			preferences.game_control_to_xbox_buttons[0] = _gamepad_analog_button_white;
+			preferences.game_control_to_xbox_buttons[1] = _gamepad_analog_button_a;
+			preferences.game_control_to_xbox_buttons[2] = _gamepad_analog_button_b;
+			preferences.game_control_to_xbox_buttons[3] = _gamepad_analog_button_y;
+			preferences.game_control_to_xbox_buttons[4] = _gamepad_analog_button_black;
+			preferences.game_control_to_xbox_buttons[5] = _gamepad_analog_button_x;
+			preferences.game_control_to_xbox_buttons[6] = _gamepad_analog_button_left_trigger;
+			preferences.game_control_to_xbox_buttons[7] = _gamepad_analog_button_right_trigger;
+			preferences.game_control_to_xbox_buttons[8] = _gamepad_binary_button_start;
+			preferences.game_control_to_xbox_buttons[9] = _gamepad_binary_button_back;
+			preferences.game_control_to_xbox_buttons[10] = _gamepad_binary_button_left_thumb;
+			preferences.game_control_to_xbox_buttons[11] = _gamepad_binary_button_right_thumb;
+			break;
+
+		/* port: Fishsticks: zoom on the left trigger, melee on the right
+		thumbstick's button, the grenade thrown with the right bumper (the
+		Duke's black), crouch on B, and the grenades switched with the pad's left
+		direction (which then does not move: input_abstraction_update); the rest
+		as the standard layout */
+		case _button_preset_fishsticks:
+			preferences.game_control_to_xbox_buttons[0] = _gamepad_analog_button_a;
+			preferences.game_control_to_xbox_buttons[1] = _gamepad_binary_button_dpad_left;
+			preferences.game_control_to_xbox_buttons[2] = _gamepad_analog_button_x;
+			preferences.game_control_to_xbox_buttons[3] = _gamepad_analog_button_y;
+			preferences.game_control_to_xbox_buttons[4] = _gamepad_binary_button_right_thumb;
+			preferences.game_control_to_xbox_buttons[5] = _gamepad_analog_button_white;
+			preferences.game_control_to_xbox_buttons[6] = _gamepad_analog_button_black;
+			preferences.game_control_to_xbox_buttons[7] = _gamepad_analog_button_right_trigger;
+			preferences.game_control_to_xbox_buttons[8] = _gamepad_binary_button_start;
+			preferences.game_control_to_xbox_buttons[9] = _gamepad_binary_button_back;
+			preferences.game_control_to_xbox_buttons[10] = _gamepad_analog_button_b;
+			preferences.game_control_to_xbox_buttons[11] = _gamepad_analog_button_left_trigger;
+			break;
+
+		/* port: Recon: the standard layout with action and reload on the right
+		bumper (the Duke's black) and the grenades switched with the left (its
+		white), which put the flashlight on X, where action was */
+		case _button_preset_recon:
+			preferences.game_control_to_xbox_buttons[0] = _gamepad_analog_button_a;
+			preferences.game_control_to_xbox_buttons[1] = _gamepad_analog_button_white;
+			preferences.game_control_to_xbox_buttons[2] = _gamepad_analog_button_black;
+			preferences.game_control_to_xbox_buttons[3] = _gamepad_analog_button_y;
+			preferences.game_control_to_xbox_buttons[4] = _gamepad_analog_button_b;
+			preferences.game_control_to_xbox_buttons[5] = _gamepad_analog_button_x;
+			preferences.game_control_to_xbox_buttons[6] = _gamepad_analog_button_left_trigger;
+			preferences.game_control_to_xbox_buttons[7] = _gamepad_analog_button_right_trigger;
+			preferences.game_control_to_xbox_buttons[8] = _gamepad_binary_button_start;
+			preferences.game_control_to_xbox_buttons[9] = _gamepad_binary_button_back;
+			preferences.game_control_to_xbox_buttons[10] = _gamepad_binary_button_left_thumb;
+			preferences.game_control_to_xbox_buttons[11] = _gamepad_binary_button_right_thumb;
+			break;
 	}
 
 	preferences.invert_look = controls->invert_look;
@@ -1207,6 +1341,35 @@ void player0_look_invert_pitch(
 	}
 
 	set_local_player_controls_from_player_profile(0);
+	return;
+}
+
+/* port: a saved game file deleted (delete_enumerated_saved_game_file): the
+files after it moved down its memory unit's list, so the indices of the
+players' profiles and the one being edited follow them, and none is left
+naming the file deleted. A player profile deleted before the one in use
+left that one's index naming the next file, often the next profile made,
+which the profile in use was then saved over (taking its name, while its
+folder kept the new profile's name, which then read as in use). */
+void player_ui_saved_game_file_removed(
+	long removed_index)
+{
+	short local_player_index;
+
+	for (local_player_index = 0; local_player_index < MAXIMUM_NUMBER_OF_LOCAL_PLAYERS; local_player_index++)
+	{
+		player_ui_globals.local_players[local_player_index].active_profile_index =
+			saved_game_file_index_after_removal(
+				player_ui_globals.local_players[local_player_index].active_profile_index,
+				removed_index);
+	}
+	player_ui_globals.edit_profile_index = saved_game_file_index_after_removal(
+		player_ui_globals.edit_profile_index,
+		removed_index);
+	player1_last_used_profile_index = saved_game_file_index_after_removal(
+		player1_last_used_profile_index,
+		removed_index);
+
 	return;
 }
 

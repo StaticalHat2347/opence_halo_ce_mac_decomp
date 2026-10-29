@@ -36,11 +36,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .android_build import (GUEST_ABI_FLAGS as ANDROID_ABI_FLAGS, GUEST_CODE_FLAGS, MUSL_URL, MUSL_VERSION, SDL_TAG,
-                            SDL_URL, VARIADIC_PROTOTYPE_FILES, EXPAT_DIR, KCP_DIR, TOML_DIR, _musl_sources, _quote)
+                            SDL_URL, VARIADIC_PROTOTYPE_FILES, EXPAT_DIR, KCP_DIR, MBEDTLS_DIR, TOML_DIR, _musl_sources,
+                            _quote)
 from .linux_build import (MINIUPNPC_DEFINES, MINIUPNPC_DIR, MUSL_MATH_DIR, XDK_INCLUDE, compile_launcher,
                           game_defines_and_includes, game_sources, miniupnpc_sources, musl_math_sources,
                           xdk_headers)
-from .embed_assets import hud_assets_build
+from .embed_assets import hud_assets_build, server_ui_build
 from .ninja_syntax import Writer
 
 PORT_DIR = Path("port/macos")
@@ -81,7 +82,7 @@ NATIVE_ABI_FLAGS = [("-mcpu=apple-m1" if flag == "-mcpu=cortex-a53" else flag)
 X86_IMAGE_BASE = 0x20000000
 X86_ABI_FLAGS = [
     "--target=x86_64-linux-gnux32",
-    "-DHALO_MACOS=1", "-DHALO_BUILD_NUMBER=159", '-DHALO_BUILD_FLAVOR=\\"custom\\"',
+    "-DHALO_MACOS=1", "-DHALO_GUEST=1", "-DHALO_GLES=1", "-DHALO_BUILD_NUMBER=159", '-DHALO_BUILD_FLAVOR=\\"custom\\"',
     f"-DHALO_GUEST_IMAGE_BASE=0x{X86_IMAGE_BASE:08x}u",
     # what Rosetta 2 translates
     "-march=x86-64-v2",
@@ -379,7 +380,8 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
             variables={"out_s": str(imports_s), "arch_arguments": "" if native else "--arch x86_64"})
     host_table_c = build / "host" / "host_import_table.c"
     thunk_headers = [ANDROID_DIR / "guest" / "runtime" / "guest_host.h",
-                     PORT_DIR / "guest" / "runtime" / "guest_host_desktop.h", LINUX_DIR / "src" / "posix.h"]
+                     PORT_DIR / "guest" / "runtime" / "guest_host_desktop.h", LINUX_DIR / "src" / "posix.h",
+                     LINUX_DIR / "src" / "posix_server.h", LINUX_DIR / "src" / "update.h"]
     n.build(outputs=host_table_c, rule="macos_host_thunks", inputs=[host_imports_list, posix_imports],
             implicit=[Path("tools/macos_host_thunks.py"), *thunk_headers],
             variables={"headers": " ".join(str(h) for h in thunk_headers)})
@@ -392,6 +394,8 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
     embedded_assets = hud_assets_build(
         n, target, build / "generated" / "hud_hires_assets.c"
     )
+    # A dedicated server's admin page (port/linux/src/server_http.c).
+    embedded_assets += server_ui_build(n, target, build / "generated" / "server_ui_assets.c")
 
     libc_includes = [
         f"-isystem {libc_include}", f"-isystem {arch}", f"-isystem {MUSL_DIR}/arch/generic",
@@ -463,9 +467,8 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         "-Isource -Isource/cseries",
         f"-I{SDL_DIR}/include", f"-I{KHRONOS_DIR}", *libc_includes, f"-idirafter {XDK_INCLUDE}",
     ])
-    # replaced by the guest runtime (memory_watch.c) or not part of the
-    # macOS port (updater.c: no self-updating; posix_*.c: in the host)
-    guest_host_only = {"memory_watch.c", "updater.c"}
+    # replaced by the guest runtime (memory_watch.c); posix_*.c run in the host.
+    guest_host_only = {"memory_watch.c"}
     for source in sorted((LINUX_DIR / "src").glob("*.c")):
         if source.name.startswith("posix_") or source.name in guest_host_only:
             continue
@@ -558,6 +561,7 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
     ])
     host_sources = sorted((PORT_DIR / "host").glob("*.c")) + [
         LINUX_DIR / "src" / "posix_files.c", LINUX_DIR / "src" / "posix_net.c",
+        LINUX_DIR / "src" / "posix_server.c",
     ]
     for source in host_sources:
         obj = host_obj_dir / (source.name + ".o")
@@ -571,6 +575,17 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
                               else source.name + ".o")
         n.build(outputs=obj, rule="macos_host_cc", inputs=source,
                 variables={"cflags": miniupnpc_cflags + (" -w" if source.name != "posix_upnp.c" else "")})
+        host_objects.append(obj)
+    # Internet play's DTLS with browsers (posix_dtls.c) runs in the host,
+    # alongside its Mbed TLS implementation, as it does on Android.
+    mbedtls_cflags = " ".join([host_cflags, f"-I{MBEDTLS_DIR / 'include'}", f"-I{MBEDTLS_DIR / 'library'}",
+                               "-DMBEDTLS_THREADING_C", "-DMBEDTLS_THREADING_PTHREAD"])
+    for source in [LINUX_DIR / "src" / "posix_dtls.c", LINUX_DIR / "src" / "posix_update.c",
+                   *sorted((MBEDTLS_DIR / "library").glob("*.c"))]:
+        obj = host_obj_dir / ("mbedtls_" + source.name + ".o" if source.parent.parent == MBEDTLS_DIR
+                              else source.name + ".o")
+        n.build(outputs=obj, rule="macos_host_cc", inputs=source,
+                variables={"cflags": mbedtls_cflags + (" -w" if source.parent.parent == MBEDTLS_DIR else "")})
         host_objects.append(obj)
     for generated in (host_table_c, gl_thunks_c):
         obj = host_obj_dir / (generated.name + ".o")
@@ -661,4 +676,3 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         n.build(outputs=math_stage / built.name, rule="macos_copy", inputs=built)
         math_staged.append(math_stage / built.name)
     n.build(outputs=target + "_math_test", rule="phony", inputs=[math_image, *math_staged])
-

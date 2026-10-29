@@ -342,6 +342,9 @@ static const char shader_prologue[] =
 	"uniform float point_size;\n"
 	/* columns the menus shift by to center on a wide screen (d3d8_gl.c) */
 	"uniform float screen_offset;\n"
+	/* a fade above a height on the model (d3d8_gl_set_height_fade): off
+	while w is zero */
+	"uniform vec4 height_fade;\n"
 	"out vec4 xD0;\n"
 	"out vec4 xD1;\n"
 	"out vec4 xB0;\n"
@@ -426,9 +429,7 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		"\tvec4 oFog = vec4(1.0), oPts = vec4(point_size), oUnused = vec4(0.0);\n"
 		"\tint a0 = 0;\n"
 		"\tvec4 A, B, C, mac, ilu;\n");
-#ifdef HALO_GLES
 	xgpu_text_append(&text, "\tvec4 clip_position = vec4(0.0);\n\tbool clip_captured = false;\n");
-#endif
 
 	for (index = 0; index < instruction_count; index++)
 	{
@@ -488,7 +489,6 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		case _ilu_lit: xgpu_text_append(&text, "\tilu = nv2a_lit(C);\n"); break;
 		default: xgpu_text_append(&text, "\tilu = vec4(0.0);\n"); break;
 		}
-#ifdef HALO_GLES
 		/* the screen-space conversion takes the reciprocal of the clip-space
 		position's w (rcc of r12.w); keep the position it converts */
 		if (ilu == _ilu_rcc && field(instruction, 3, 28, 2) == _mux_temporary &&
@@ -496,7 +496,6 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		{
 			xgpu_text_append(&text, "\tclip_position = oPos;\n\tclip_captured = true;\n");
 		}
-#endif
 
 		/* results are written only after both units have read their inputs */
 		if (mac == _mac_arl)
@@ -535,6 +534,13 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 	}
 
 	xgpu_text_append(&text,
+		"\tif (height_fade.w != 0.0)\n"
+		"\t{\n"
+		"\t\tfloat faded = clamp((height_fade.y - (oT0.z - height_fade.z) / height_fade.w) * height_fade.x, 0.0, 1.0);\n"
+		"\t\toD0 *= faded;\n"
+		"\t\toD1 *= faded;\n"
+		"\t}\n");
+	xgpu_text_append(&text,
 		"\t/* undo the screen-space conversion done with c[-38] and c[-37] */\n"
 		"\tvec3 scale = vec3(viewport_scale.x != 0.0 ? viewport_scale.x : 1.0,\n"
 		"\t\tviewport_scale.y != 0.0 ? viewport_scale.y : 1.0,\n"
@@ -542,21 +548,33 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		/* Direct3D 8 puts pixel centres on integer screen coordinates (the
 		game offsets its screen-space quads by -0.5 to match), OpenGL on
 		half-integers */
-#ifdef HALO_GLES
 		/* The conversion is screen = clip * c[-38] * rcc(w) + c[-37]; undoing
 		it by multiplying by w again is lossy near the camera plane, where
 		rcc clamps and 1/w rounds differently on each GPU (Mali put vertices
 		of the first-person weapon at the vanishing point). Where the clip
 		position was kept, the same result is computed without dividing. */
+		"\tvec4 position;\n"
 		"\tif (clip_captured)\n"
-		"\t\tgl_Position = vec4((clip_position.xyz * c[%d].xyz + (c[%d].xyz + vec3(0.5 + screen_offset, 0.5, 0.0)\n"
+		"\t\tposition = vec4((clip_position.xyz * c[%d].xyz + (c[%d].xyz + vec3(0.5 + screen_offset, 0.5, 0.0)\n"
 		"\t\t\t- viewport_offset.xyz) * clip_position.w) / scale, clip_position.w);\n"
 		"\telse\n"
-		"\t\tgl_Position = vec4((vec3(oPos.xy + vec2(0.5 + screen_offset, 0.5), oPos.z) - viewport_offset.xyz) / scale * oPos.w, oPos.w);\n"
-#else
-		"\tvec3 ndc = (vec3(oPos.xy + vec2(0.5 + screen_offset, 0.5), oPos.z) - viewport_offset.xyz) / scale;\n"
-		"\tgl_Position = vec4(ndc * oPos.w, oPos.w);\n"
-#endif
+		"\t{\n"
+		"\t\tvec3 ndc = (vec3(oPos.xy + vec2(0.5 + screen_offset, 0.5), oPos.z) - viewport_offset.xyz) / scale;\n"
+		"\t\tposition = vec4(ndc * oPos.w, oPos.w);\n"
+		"\t}\n"
+		/* A position whose w is zero, or is not a number, is the clip-space
+		origin: the screen conversion's reciprocal is clamped rather than
+		infinite, so a large position times a w of zero is exactly zero, and
+		the origin is inside the frustum. Nothing then clips the triangle
+		away and OpenGL divides zero by zero there: the vertex lands on the
+		middle of the screen and the triangle is drawn out to it from the
+		first-person weapon, whose pose follows the camera and so reaches the
+		camera plane. The divide on the Xbox sends such a vertex to infinity
+		and the clipper takes the triangle; put it behind the camera instead,
+		which the clipper also takes. */
+		"\tif (!(abs(position.w) > 0.0))\n"
+		"\t\tposition = vec4(0.0, 0.0, 0.0, -1.0);\n"
+		"\tgl_Position = position;\n"
 #ifdef HALO_GLES
 		/* what glClipControl(GL_UPPER_LEFT, GL_ZERO_TO_ONE) does on desktop
 		GL: rows from the top, depth 0..1 */
@@ -573,10 +591,46 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
 		"\txT2 = oT2;\n"
 		"\txT3 = oT3;\n"
 		"\txFog = oFog.x;\n"
-		"}\n"
-#ifdef HALO_GLES
-		, XGPU_VERTEX_CONSTANT_BIAS - 38, XGPU_VERTEX_CONSTANT_BIAS - 37
-#endif
+		"}\n",
+		XGPU_VERTEX_CONSTANT_BIAS - 38, XGPU_VERTEX_CONSTANT_BIAS - 37
 		);
+	return text.buffer;
+}
+
+/* The fixed-function pipeline's vertex shader, for the draws that select it
+(SetVertexShader with 0): only the loading screen's
+(progress_bar.c), which gives each vertex its position, diffuse color and
+up to four texture coordinates in immediate mode. d3d8_gl.c transforms the
+positions by the world, view and projection matrices before the draw, so the
+position here is already in Direct3D's clip space. */
+char *nv2a_fixed_function_glsl(void)
+{
+	struct xgpu_text text = { 0 };
+	unsigned long index;
+
+#ifdef HALO_GLES
+	xgpu_text_append(&text, "#version %s\n", xgpu_capabilities.shading_language);
+#endif
+	xgpu_text_append(&text, "%s", shader_prologue);
+	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
+		xgpu_text_append(&text, "layout(location = %lu) in vec4 v%lu_in;\n", index, index);
+	xgpu_text_append(&text,
+		"void main()\n{\n"
+		"\tgl_Position = v0_in;\n"
+#ifdef HALO_GLES
+		"\tgl_Position.y = -gl_Position.y;\n"
+		"\tgl_Position.z = 2.0 * gl_Position.z - gl_Position.w;\n"
+#endif
+		"\tgl_PointSize = 1.0;\n"
+		"\txD0 = clamp(v3_in, 0.0, 1.0);\n"
+		"\txD1 = clamp(v4_in, 0.0, 1.0);\n"
+		"\txB0 = vec4(0.0, 0.0, 0.0, 1.0);\n"
+		"\txB1 = vec4(0.0, 0.0, 0.0, 1.0);\n"
+		"\txT0 = v9_in;\n"
+		"\txT1 = v10_in;\n"
+		"\txT2 = v11_in;\n"
+		"\txT3 = v12_in;\n"
+		"\txFog = 1.0;\n"
+		"}\n");
 	return text.buffer;
 }

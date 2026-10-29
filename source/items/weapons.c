@@ -220,7 +220,9 @@ symbols in this file:
 #include "game/cheats.h"
 #include "game/game.h"
 #include "game/game_engine.h"
+#include "infection.h" /* port: port/linux/game/infection.c */
 #include "game/players.h"
+#include "game/aim_assist.h" /* port: the reticle's read-only shot direction */
 #include "interface/first_person_weapons.h"
 #include "math/periodic_functions.h"
 #include "models/model_animation_definitions.h"
@@ -230,6 +232,12 @@ symbols in this file:
 #include "sound/sound_definitions.h"
 #include "units/unit_definitions.h"
 #include "units/units.h"
+
+#ifdef HALO_PORT_MAXIMUM_NETWORK_PLAYERS
+#include "bitmaps/bitmap_group.h"
+#include "cache/texture_cache.h"
+#include "effects/contrail_definitions.h"
+#endif
 
 /* port/linux/game/pal_tags.c's */
 short pal_tags_first_person_frames(long graph_index, short animation_index, short frames);
@@ -363,6 +371,11 @@ struct trigger_firing_effect
 };
 
 /* ---------- prototypes */
+
+/* port/linux/game/network_objects.c's: whether a client of the distributed
+netcode is deleting an object in distributed_client_delete (the host's, on
+its word, or one the host has not told it of) */
+boolean network_objects_client_deleting(void);
 
 static short weapon_magazine_count(
 	struct weapon_definition const *weapon_definition);
@@ -572,6 +585,58 @@ void weapons_dispose(
 	return;
 }
 
+#ifdef HALO_PORT_MAXIMUM_NETWORK_PLAYERS
+/* A trail's first draw requests its bitmap asynchronously and is skipped
+until that read finishes. Warm only the projectile trails of a weapon that
+has been created or readied, before its first shot. Keep ordinary
+streaming nonblocking and leave the original trail tags and lifetime alone. */
+static void weapon_precache_projectile_trails(
+	long definition_index)
+{
+	if (definition_index != NONE)
+	{
+		struct weapon_definition *definition = weapon_definition_get(definition_index);
+		short trigger_index;
+
+		for (trigger_index = 0; trigger_index < definition->weapon.triggers.count; trigger_index++)
+		{
+			struct weapon_trigger_definition *trigger = TAG_BLOCK_GET_ELEMENT(
+				&definition->weapon.triggers, trigger_index, struct weapon_trigger_definition);
+
+			if (trigger->projectile.index != NONE)
+			{
+				struct projectile_definition *projectile = projectile_definition_get(trigger->projectile.index);
+				short attachment_index;
+
+				for (attachment_index = 0; attachment_index < projectile->object.attachments.count; attachment_index++)
+				{
+					struct object_attachment_definition *attachment = TAG_BLOCK_GET_ELEMENT(
+						&projectile->object.attachments, attachment_index, struct object_attachment_definition);
+
+					if (attachment->type.group_tag == CONTRAIL_DEFINITION_TAG && attachment->type.index != NONE)
+					{
+						struct contrail_definition *contrail = contrail_definition_get(attachment->type.index);
+
+						if (contrail->bitmap.index != NONE)
+						{
+							struct bitmap_group *bitmap = bitmap_group_get(contrail->bitmap.index);
+							short bitmap_index;
+
+							for (bitmap_index = 0; bitmap_index < bitmap->bitmaps.count; bitmap_index++)
+							{
+								_texture_cache_bitmap_get_hardware_format(
+									TAG_BLOCK_GET_ELEMENT(&bitmap->bitmaps, bitmap_index, struct bitmap_data),
+									FALSE, TRUE);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+#endif
+
 void weapon_place(
 	long weapon_index,
 	struct scenario_weapon_datum *scenario_weapon)
@@ -603,6 +668,9 @@ void weapon_ready(
 	struct weapon_datum* weapon = weapon_get(weapon_index);
 	struct weapon_definition *weapon_definition = weapon_definition_get(weapon->definition_index);
 
+#ifdef HALO_PORT_MAXIMUM_NETWORK_PLAYERS
+	weapon_precache_projectile_trails(weapon->definition_index);
+#endif
 	weapon_reset(weapon_index);
 	weapon_set_state(weapon_index, _weapon_state_ready, TRUE);
 	first_person_weapon_message_from_weapon(weapon_index, _first_person_weapon_message_ready);
@@ -814,6 +882,9 @@ boolean weapon_new(
 		trigger->idle_ticks = 127;
 	}
 
+#ifdef HALO_PORT_MAXIMUM_NETWORK_PLAYERS
+	weapon_precache_projectile_trails(weapon->definition_index);
+#endif
 	return TRUE;
 }
 
@@ -844,9 +915,14 @@ void weapon_set_total_rounds(
 void weapon_delete(
 	long weapon_index)
 {
-	if (game_engine_running())
+	/* (port: but a flag or ball a client of the distributed netcode deletes,
+	on the host's word or as one the host has not told it of: objects.c's
+	object_delete_initial_recursive) */
+	if (game_engine_running() && !network_objects_client_deleting())
 	{
-		match_assert("c:\\halo\\SOURCE\\items\\weapons.c", 234, !weapon_is_flag(weapon_index));
+		/* port: (but an Infection zombie's skull: infection.c) */
+		match_assert("c:\\halo\\SOURCE\\items\\weapons.c", 234,
+			!weapon_is_flag(weapon_index) || infection_can_delete_skull(weapon_index));
 	}
 
 	return;
@@ -2304,6 +2380,51 @@ static void projectile_distribute(
 	}
 
 	return;
+}
+
+/* port: the player's pre-spread ray, following trigger_create_projectiles'
+origin, offset, autoaim and weapon-origin rules, without creating a shot. */
+boolean weapon_get_projectile_ray(long weapon_index, short trigger_index, real_point3d *origin, real_vector3d *forward)
+{
+	struct weapon_datum *weapon = weapon_get(weapon_index);
+	struct weapon_definition *definition = weapon_definition_get(weapon->definition_index);
+	long owner_index = weapon_get_owner_object_index(weapon_index);
+	struct unit_datum *unit = owner_index != NONE ? unit_try_and_get(owner_index) : NULL;
+	struct weapon_trigger_definition *trigger;
+	struct object_marker marker;
+	real velocity = 0.0f;
+
+	if (!unit || unit->unit.player_index == NONE || trigger_index < 0 ||
+		trigger_index >= definition->weapon.triggers.count)
+		return FALSE;
+	trigger = TAG_BLOCK_GET_ELEMENT(&definition->weapon.triggers, trigger_index, struct weapon_trigger_definition);
+	if (trigger->projectile.index == NONE)
+		return FALSE;
+	object_get_marker_by_name(weapon_get_effect_object_index(weapon_index),
+		trigger_index == 0 ? "primary trigger" : "secondary trigger", &marker, 1);
+	*origin = marker.matrix.position;
+	*forward = marker.matrix.forward;
+	if (!TEST_FLAG(trigger->flags, _weapon_trigger_projectiles_cannot_be_aimed_bit) &&
+		!TEST_FLAG(unit->object.damage_flags, _object_dead_bit))
+	{
+		struct unit_definition *unit_definition = unit_definition_get(unit->definition_index);
+		real_vector3d right, up;
+
+		unit_adjust_projectile_ray(owner_index, origin, forward, &velocity,
+			TEST_FLAG(unit_definition->unit.flags, _unit_fires_from_camera_bit), TRUE);
+		cross_product3d(global_up3d, forward, &right);
+		if (normalize3d(&right) == 0.0f)
+			right = *global_left3d;
+		cross_product3d(forward, &right, &up);
+		normalize3d(&up);
+		point_from_line3d(origin, forward, trigger->first_person_weapon_offset.x, origin);
+		point_from_line3d(origin, &right, trigger->first_person_weapon_offset.y, origin);
+		point_from_line3d(origin, &up, trigger->first_person_weapon_offset.z, origin);
+		player_aim_projectile_preview(unit->unit.player_index, origin, forward);
+	}
+	if (TEST_FLAG(trigger->flags, _weapon_trigger_uses_weapon_origin_bit))
+		*origin = marker.matrix.position;
+	return normalize3d(forward) != 0.0f;
 }
 
 static void trigger_create_projectiles(

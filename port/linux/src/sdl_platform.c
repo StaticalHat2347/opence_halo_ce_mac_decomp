@@ -14,26 +14,43 @@ and the debug keyboard that the game's console reads.
 #include "gl.h"
 #include "port_config.h"
 #include "p2p.h"
+#include "port_mods.h"
+#include "server_mode.h"
+#include "server_master.h"
 #include "xiso.h"
+#include "touch_input.h"
+#include "../game/text_filter.h"
 
 #include <SDL3/SDL.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef HALO_WINDOWS
+/* port/windows/src/win32_window.c, compiled with the Windows SDK */
+void win32_window_borderless_apply(SDL_Window *window);
+#endif
 #if !defined(_WIN32) && !defined(HALO_ANDROID)
 #include <signal.h>
+#endif
+#if defined(__linux__) && !defined(HALO_ARM64_GUEST) && !defined(HALO_ANDROID)
+#include <dlfcn.h>
+#include <unistd.h>
 #endif
 
 static SDL_Window *platform_window;
 static SDL_GLContext platform_gl_context;
 static SDL_ThreadID platform_event_thread;
 static BOOL platform_sdl_started = FALSE;
+/* the game's window was asked for (platform_video_initialize): without one
+after that, the game runs without a window (platform_pump_events) */
+static BOOL platform_video_tried = FALSE;
 
 static struct platform_input_state input_state;
 /* keys pressed since the last read, so a press and release between two
 reads still counts as a press (input injected on Android, or a slow frame) */
 static unsigned char keys_pressed[SDL_SCANCODE_COUNT];
+/* The bound Screenshot action requests capture at the next presentation. */
+static BOOL screenshot_requested;
 /* likewise the mouse buttons pressed since the last read, so that a click
 quicker than a frame still counts */
 static unsigned char mouse_buttons_pressed[PLATFORM_MOUSE_BUTTON_COUNT];
@@ -96,42 +113,108 @@ void dsound_sdl_output_device_check(void);
 /* updater.c's: the desktop self-updater */
 void updater_start(void);
 void updater_poll(SDL_Window *window);
+static void screen_keyboard_update(void);
+#ifndef HALO_GLES
+/* the windows' icon, a PNG (tools/embed_assets.py, from port/assets/icon) */
+extern const unsigned int platform_window_icon[];
+extern const unsigned long platform_window_icon_size;
+/* the menus' pointer, a PNG (tools/embed_assets.py, from port/assets/cursor) */
+extern const unsigned int platform_menu_cursor[];
+extern const unsigned long platform_menu_cursor_size;
+#endif
 #endif
 
-/* the game's console (source/interface/terminal.c): a line on the screen
-that fades */
-void terminal_printf(const void *color, const char *format, ...);
-/* the game's log, debug.txt (source/cseries/errors.c); not error(), which
-shows the game's error screen */
-void write_to_error_file(char *string, unsigned char date);
-
-/* the game's frames-a-second counter (source/main/main.c) */
-extern unsigned char display_framerate;
-
-/* what the port's keys did: on the screen and in the log */
-static void notice(const char *format, ...)
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
+/* the maps folder checked to hold the Xbox maps (platform_maps_folder_check).
+When it holds Halo PC's instead, or no ui.map, the player is told where each
+kind goes and the game quits, rather than failing to load Halo PC's ui.map
+as the Xbox's (game_load). Halo PC maps in maps/ itself, which play only from
+custom_maps, are warned of */
+static void data_check_maps(void)
 {
-	char text[256];
-	va_list arguments;
+	struct platform_maps_folder maps;
+	char message[2048];
+	char where[1200];
+	BOOL quiet = config_boolean("debug.hidden_window") || config_real("debug.exit_after") > 0.0 ||
+		config_string("debug.network_test")[0];
 
-	va_start(arguments, format);
-	vsnprintf(text, sizeof(text), format, arguments);
-	va_end(arguments);
-	platform_log("%s", text);
+	platform_maps_folder_check(&maps);
+	snprintf(where, sizeof(where),
+		"Put the Xbox maps from your Halo: Combat Evolved disc image in %s/maps. Halo Custom Edition "
+		"maps go in a custom_maps folder beside it.",
+		maps.root);
+	switch (maps.state)
 	{
-		char line[sizeof(text) + 2];
-
-		snprintf(line, sizeof(line), "%s\r\n", text);
-		write_to_error_file(line, TRUE);
+	case _maps_folder_xbox:
+		if (!maps.stray_pc_maps)
+			return;
+		snprintf(message, sizeof(message),
+			"These maps in the maps folder are Halo PC maps, which play only from custom_maps: %s%s.\n\n%s",
+			maps.stray_names, maps.stray_pc_maps > PLATFORM_MAPS_FOLDER_NAMED ? " and more" : "", where);
+		platform_log("maps folder: %ld Halo PC maps in %s/maps (%s)", maps.stray_pc_maps, maps.root,
+			maps.stray_names);
+		if (!quiet)
+			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Halo", message, NULL);
+		return;
+	case _maps_folder_halo_pc:
+		snprintf(message, sizeof(message),
+			"The maps folder holds Halo PC maps, not the Xbox maps: its ui.map is from %s.\n\n%s\n\n"
+			"To copy the Xbox maps out of your disc image again, move this maps folder aside and "
+			"start the game.",
+			maps.ui_version == 609 ? "Halo PC (Custom Edition)" : "Halo PC", where);
+		break;
+	default:
+		snprintf(message, sizeof(message),
+			"Halo's Xbox maps were not found: %s/maps has no ui.map.\n\n%s\n\n"
+			"To copy the Xbox maps out of your disc image, move the maps folder aside and start the game.",
+			maps.root, where);
+		break;
 	}
-	terminal_printf(NULL, "%s", text);
+	platform_log("maps folder: %s/maps is not the Xbox maps (ui.map version %ld): quitting", maps.root,
+		maps.ui_version);
+	platform_log("%s", message);
+	if (!quiet)
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Halo", message, NULL);
+	exit(EXIT_FAILURE);
 }
+#endif
+
+#if defined(__linux__) && !defined(HALO_ARM64_GUEST) && !defined(HALO_ANDROID)
+/* NVIDIA's driver draws into a Wayland window through its egl-wayland
+library, which distributions ship 64-bit only (Arch has no lib32 package
+of it). In this 32-bit game, OpenGL on Wayland (EGL) then falls back to
+Mesa's llvmpipe, drawn on the processor, while on X11 (XWayland, GLX) the
+32-bit driver draws it. So with NVIDIA's module loaded and no 32-bit
+egl-wayland, SDL tries X11 before Wayland; SDL_VIDEO_DRIVER still decides */
+static void platform_choose_video_driver(void)
+{
+	static const char *const egl_wayland[] = { "libnvidia-egl-wayland.so.1", "libnvidia-egl-wayland2.so.1" };
+	size_t index;
+
+	if (getenv("SDL_VIDEO_DRIVER") || !getenv("WAYLAND_DISPLAY") || access("/sys/module/nvidia", F_OK) != 0)
+		return;
+	for (index = 0; index < sizeof(egl_wayland) / sizeof(egl_wayland[0]); index++)
+	{
+		void *library = dlopen(egl_wayland[index], RTLD_LAZY | RTLD_LOCAL);
+
+		if (library)
+		{
+			dlclose(library);
+			return;
+		}
+	}
+	platform_log("video: NVIDIA's driver has no 32-bit egl-wayland here: X11 (XWayland) before Wayland, "
+		"where OpenGL would be drawn on the processor (SDL_VIDEO_DRIVER=wayland chooses Wayland)");
+	SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
+}
+#endif
 
 BOOL platform_sdl_initialize(void)
 {
+	SDL_InitFlags flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_EVENTS;
+
 	if (platform_sdl_started)
 		return TRUE;
-	display_framerate = config_boolean("display.show_fps") ? 1 : 0;
 #if !defined(_WIN32) && !defined(HALO_ANDROID)
 	/* a write to a connection the other end closed fails instead of ending
 	the game (the game's sockets and Discord's pass MSG_NOSIGNAL, but UPnP's
@@ -143,6 +226,9 @@ BOOL platform_sdl_initialize(void)
 	if (p2p_hand_off_invite())
 		exit(EXIT_SUCCESS);
 	SDL_SetHint(SDL_HINT_APP_NAME, "Halo");
+#if defined(__linux__) && !defined(HALO_ARM64_GUEST) && !defined(HALO_ANDROID)
+	platform_choose_video_driver();
+#endif
 #ifdef HALO_ANDROID
 	/* landscape only; the back key arrives as a key event (xinput_sdl.c)
 	instead of closing the activity */
@@ -152,24 +238,76 @@ BOOL platform_sdl_initialize(void)
 	controller emulation in xinput_sdl.c) */
 	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 #endif
-	if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_EVENTS))
+#if defined(__linux__) && !defined(HALO_ANDROID)
+	/* input.playstation_kernel_driver: a PlayStation pad through the
+	kernel's driver of it (hid-playstation's, hid-sony's: its buttons,
+	sticks, triggers and rumble) where the kernel has one, not SDL's own:
+	SDL's reads the pad's hidraw node, which only udev rules (Steam's) open
+	to the player, and a pad it took and could not open was not found at
+	all. SDL's own has the lightbar and the motion sensors */
+	if (config_boolean("input.playstation_kernel_driver"))
 	{
-		platform_log("SDL_Init failed: %s", SDL_GetError());
+		if (SDL_GetPathInfo("/sys/bus/hid/drivers/playstation", NULL))
+			SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "0");
+		if (SDL_GetPathInfo("/sys/bus/hid/drivers/sony", NULL))
+			SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "0");
+	}
+#endif
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
+	/* a dedicated server (server_mode.c) runs where there is no display,
+	sound or controller (a service, a container): SDL's drivers that need
+	none, and its events alone */
+	if (halo_server_mode())
+	{
+		SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+		SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
+		flags = SDL_INIT_EVENTS;
+	}
+#endif
+	if (!SDL_Init(flags))
+	{
+		/* (tried again by each caller that needs SDL, some of them every
+		frame: a failure is logged once, and again only when its reason
+		changes, not tens of thousands of times without a display) */
+		static char last_failure[256];
+		const char *error = SDL_GetError();
+
+		if (strncmp(error, last_failure, sizeof(last_failure) - 1))
+		{
+			snprintf(last_failure, sizeof(last_failure), "%s", error);
+			platform_log("SDL_Init failed: %s", error);
+		}
 		return FALSE;
 	}
 	platform_sdl_started = TRUE;
 #ifndef HALO_ANDROID
 	/* found (or offered to the player, platform_offer_game_data) before the
-	game's window opens */
+	game's window opens, and checked to be the Xbox maps (a dedicated
+	server's were, by server_mode.c) */
 	platform_data_root();
-	/* (a new version looked for meanwhile, updater_poll asking about it) */
-	updater_start();
+#ifndef HALO_WEB
+	if (!halo_server_mode())
+		data_check_maps();
 #endif
+	/* (a new version looked for meanwhile, updater_poll asking about it; a
+	dedicated server's is server.auto_update's) */
+	if (!halo_server_mode())
+	{
+		updater_start();
+		/* (a player's public game on the master servers too, with a
+		publisher key: server_master.c) */
+		server_master_start_host();
+	}
+#endif
+	/* (the mods, and whether to play those that say they cannot be played
+	together, before the window opens: port_mods.c) */
+	port_mods_startup();
 	return TRUE;
 }
 
-#ifndef HALO_ANDROID
-/* ---------- first start without game data (xbox_files.c) */
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
+/* ---------- first start without game data (xbox_files.c; the web page
+imports it itself) */
 
 struct data_extraction
 {
@@ -292,7 +430,9 @@ static BOOL data_extract(const char *image, const char *destination, char *error
 struct data_image_choice
 {
 	SDL_AtomicInt done;
+	BOOL failed;
 	char path[1024];
+	char error[256];
 };
 
 static void SDLCALL data_image_chosen(void *userdata, const char * const *files, int filter)
@@ -300,13 +440,47 @@ static void SDLCALL data_image_chosen(void *userdata, const char * const *files,
 	struct data_image_choice *choice = userdata;
 
 	(void)filter;
-	if (files && files[0])
+	if (!files)
+	{
+		/* no dialog could be shown (SDL needs the desktop portal through
+		libdbus, or zenity) */
+		choice->failed = TRUE;
+		snprintf(choice->error, sizeof(choice->error), "%s",
+			*SDL_GetError() ? SDL_GetError() : "no desktop portal or zenity");
+	}
+	else if (files[0])
+	{
 		snprintf(choice->path, sizeof(choice->path), "%s", files[0]);
+	}
 	SDL_SetAtomicInt(&choice->done, 1);
 }
 
-/* the disc image the player picks; FALSE if they pick none */
-static BOOL data_choose_image(char *path, int size)
+/* a disc image in the folder the maps are extracted to (next to the
+executable), for systems where no file dialog can be shown */
+static BOOL data_find_image(const char *directory, char *path, int size)
+{
+	static const char *const patterns[] = { "*.iso", "*.xiso" };
+	int pattern;
+
+	for (pattern = 0; pattern < (int)(sizeof(patterns) / sizeof(patterns[0])); pattern++)
+	{
+		int count = 0;
+		char **files = SDL_GlobDirectory(directory, patterns[pattern], SDL_GLOB_CASEINSENSITIVE, &count);
+
+		if (files && count > 0)
+		{
+			snprintf(path, (size_t)size, "%s/%s", directory, files[0]);
+			SDL_free(files);
+			return TRUE;
+		}
+		SDL_free(files);
+	}
+	return FALSE;
+}
+
+/* the disc image the player picks; FALSE if they pick none, with *failed
+set (and error written) when no dialog could be shown */
+static BOOL data_choose_image(char *path, int size, BOOL *failed, char *error, int error_size)
 {
 	static const SDL_DialogFileFilter filters[] =
 	{
@@ -324,6 +498,9 @@ static BOOL data_choose_image(char *path, int size)
 		SDL_PumpEvents();
 		SDL_Delay(50);
 	}
+	*failed = choice.failed;
+	if (choice.failed)
+		snprintf(error, (size_t)error_size, "%s", choice.error);
 	if (!choice.path[0])
 		return FALSE;
 	snprintf(path, (size_t)size, "%s", choice.path);
@@ -337,7 +514,9 @@ BOOL platform_offer_game_data(const char *destination)
 		{ SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Yes" },
 		{ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "No" },
 	};
-	char message[1400];
+	char message[2600];
+	char found[1024];
+	BOOL image_found;
 
 	/* not for runs nobody is watching */
 	if (config_boolean("debug.hidden_window") || config_real("debug.exit_after") > 0.0 ||
@@ -345,27 +524,59 @@ BOOL platform_offer_game_data(const char *destination)
 	{
 		return FALSE;
 	}
-	snprintf(message, sizeof(message),
-		"Halo's game data (its maps folder) was not found.\n\n"
-		"Extract the maps folder from an Xbox disc image (.iso) of Halo: Combat Evolved? "
-		"It is copied to %s/maps (about 2 GB).\n\n"
-		"(Or put the maps folder there yourself, or set paths.data in config.toml.)",
-		destination);
+	image_found = data_find_image(destination, found, sizeof(found));
+	if (image_found)
+	{
+		snprintf(message, sizeof(message),
+			"Halo's game data (its maps folder) was not found.\n\n"
+			"Extract the maps folder from the Xbox disc image %s? "
+			"It is copied to %s/maps (about 2 GB).\n\n"
+			"(Or put the maps folder there yourself, or set paths.data in config.toml.)",
+			found, destination);
+	}
+	else
+	{
+		snprintf(message, sizeof(message),
+			"Halo's game data (its maps folder) was not found.\n\n"
+			"Extract the maps folder from an Xbox disc image (.iso) of Halo: Combat Evolved? "
+			"It is copied to %s/maps (about 2 GB).\n\n"
+			"(Or put the maps folder there yourself, or set paths.data in config.toml.)",
+			destination);
+	}
 	for (;;)
 	{
 		SDL_MessageBoxData question = { SDL_MESSAGEBOX_INFORMATION, NULL, "Halo", message, 2, buttons, NULL };
 		char image[1024];
 		char error[512];
 		int answer = 0;
+		BOOL failed = FALSE;
 
 		if (!SDL_ShowMessageBox(&question, &answer) || answer != 1)
 		{
 			platform_log("no game data: quitting");
 			exit(EXIT_SUCCESS);
 		}
-		/* no image picked: ask again */
-		if (!data_choose_image(image, sizeof(image)))
-			continue;
+		if (image_found)
+		{
+			snprintf(image, sizeof(image), "%s", found);
+		}
+		else if (!data_choose_image(image, sizeof(image), &failed, error, sizeof(error)))
+		{
+			char explanation[1400];
+
+			/* no image picked: ask again */
+			if (!failed)
+				continue;
+			/* no dialog could be shown */
+			platform_log("no file dialog: %s", error);
+			snprintf(explanation, sizeof(explanation),
+				"No file dialog could be shown (%s).\n\n"
+				"Put the disc image (.iso) in %s and start Halo again, "
+				"or install zenity.",
+				error, destination);
+			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Halo", explanation, NULL);
+			exit(EXIT_SUCCESS);
+		}
 		platform_log("extracting the maps folder from %s to %s", image, destination);
 		if (data_extract(image, destination, error, sizeof(error)))
 		{
@@ -373,6 +584,7 @@ BOOL platform_offer_game_data(const char *destination)
 			return TRUE;
 		}
 		platform_log("extraction failed: %s", error);
+		image_found = FALSE;
 		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Halo", error, NULL);
 	}
 }
@@ -421,119 +633,169 @@ static BOOL platform_fullscreen_setting(void)
 	return !config_boolean("debug.hidden_window") && platform_display_mode() != _display_mode_windowed;
 }
 
+/* a size as a setting has it, "<width>x<height>": whether it is one, and
+the Xbox's 640x480 or more */
+static BOOL platform_size_parse(const char *text, long *width, long *height)
+{
+	char *end;
+
+	*width = strtol(text, &end, 10);
+	*height = *end == 'x' || *end == 'X' ? strtol(end + 1, &end, 10) : 0;
+	return !*end && *width >= 640 && *height >= 480;
+}
+
+/* display.resolution in pixels, or 0x0 for the display's own ("native"),
+as for one the game cannot draw at */
+static void platform_resolution_setting(long *width, long *height)
+{
+	if (!platform_size_parse(config_string("display.resolution"), width, height))
+		*width = *height = 0;
+}
+
+/* the window's size (display.window_size), else the Xbox's 640x480 times
+display.window_scale, as older versions set it */
+static void platform_window_size_setting(long *width, long *height)
+{
+	long scale = config_integer("display.window_scale");
+
+	if (!platform_size_parse(config_string("display.window_size"), width, height))
+	{
+		*width = 640 * (scale < 1 ? 1 : scale);
+		*height = 480 * (scale < 1 ? 1 : scale);
+	}
+}
+
+/* a display's own size in pixels (its desktop mode) */
+static BOOL platform_display_size(SDL_DisplayID display, long *width, long *height)
+{
+	const SDL_DisplayMode *mode = display ? SDL_GetDesktopDisplayMode(display) : NULL;
+
+	if (!mode)
+		return FALSE;
+	*width = (long)(mode->w * mode->pixel_density + 0.5f);
+	*height = (long)(mode->h * mode->pixel_density + 0.5f);
+	return TRUE;
+}
+
 /* the window's fullscreen kind (display.mode): borderless, a window over
 the whole desktop (SDL's fullscreen without a mode), or fullscreen, the
-display taken at its desktop resolution. Either draws at the display's
-resolution (platform_screen_mode); F11 switches to the kind set. */
+display taken at display.resolution's mode (the one nearest it), else at its
+desktop one. F11 switches to the kind set. */
 static void platform_fullscreen_kind_apply(void)
 {
 	static int applied = -1;
+	static long applied_width, applied_height;
 	int exclusive = platform_display_mode() == _display_mode_fullscreen ? 1 : 0;
+	long width = 0, height = 0;
 	SDL_DisplayID display;
+	SDL_DisplayMode closest;
+	const SDL_DisplayMode *mode = NULL;
 
-	if (!platform_window || exclusive == applied)
+	if (!platform_window)
+		return;
+	if (exclusive)
+		platform_resolution_setting(&width, &height);
+	if (exclusive == applied && width == applied_width && height == applied_height)
 		return;
 	applied = exclusive;
+	applied_width = width;
+	applied_height = height;
 	display = SDL_GetDisplayForWindow(platform_window);
-	SDL_SetWindowFullscreenMode(platform_window,
-		exclusive && display ? SDL_GetDesktopDisplayMode(display) : NULL);
+	if (exclusive && display)
+	{
+		if (width && SDL_GetClosestFullscreenDisplayMode(display, (int)width, (int)height, 0.0f, false, &closest))
+			mode = &closest;
+		else
+			mode = SDL_GetDesktopDisplayMode(display);
+	}
+	SDL_SetWindowFullscreenMode(platform_window, mode);
 }
 
-/* configured fullscreen resolution */
-static void platform_resolution_setting(long *width, long *height);
+/* whether the game last asked for the window to be fullscreen */
+static BOOL platform_fullscreen_requested = FALSE;
 
-/* whether the game is, or is to be, fullscreen, and if so the size in
-pixels of the display it fills (d3d8_gl.c draws at that resolution) */
-BOOL platform_screen_mode(long *width, long *height)
+static void platform_window_set_fullscreen(BOOL fullscreen)
+{
+	platform_fullscreen_requested = fullscreen;
+	SDL_SetWindowFullscreen(platform_window, fullscreen ? true : false);
+}
+
+/* whether the window is fullscreen. SDL sets its flag when the window
+manager confirms the request, and some never do: gamescope (the Steam
+Deck's Game Mode) makes the window the size of the display but leaves the
+flag unset, so the game drew 640x480 and gamescope stretched it. A window
+that was asked to be fullscreen and covers its display counts too. */
+static BOOL platform_window_fullscreen(void)
 {
 	SDL_DisplayID display;
 	const SDL_DisplayMode *mode;
+	int width, height;
 
-	if (platform_window ? !(SDL_GetWindowFlags(platform_window) & SDL_WINDOW_FULLSCREEN) :
-		!platform_fullscreen_setting() || !platform_sdl_initialize())
-	{
+	if (SDL_GetWindowFlags(platform_window) & SDL_WINDOW_FULLSCREEN)
+		return TRUE;
+	if (!platform_fullscreen_requested)
 		return FALSE;
-	}
-	display = platform_window ? SDL_GetDisplayForWindow(platform_window) : SDL_GetPrimaryDisplay();
+	display = SDL_GetDisplayForWindow(platform_window);
 	mode = display ? SDL_GetDesktopDisplayMode(display) : NULL;
-	if (!mode)
+	if (!mode || !SDL_GetWindowSizeInPixels(platform_window, &width, &height))
 		return FALSE;
+	return width >= (int)(mode->w * mode->pixel_density + 0.5f) &&
+		height >= (int)(mode->h * mode->pixel_density + 0.5f);
+}
 
-	platform_resolution_setting(width, height);
-	if (!*width || !*height)
+/* the size in pixels the game draws its picture at (d3d8_gl.c): the
+window's, the display's while fullscreen, or display.resolution's while
+fullscreen (either kind) where the display has room for it; before the
+window opens, what it will be. FALSE where display.resolution_scaling is
+"original": the Xbox's 640x480, scaled to the window. */
+BOOL platform_screen_mode(long *width, long *height)
+{
+	/* (the size last given, for a window that has none: minimized) */
+	static long last_width, last_height;
+	long resolution_width, resolution_height;
+	BOOL fullscreen;
+
+	if (!strcmp(config_string("display.resolution_scaling"), "original"))
+		return FALSE;
+	if (platform_window)
 	{
-		*width = (long)(mode->w * mode->pixel_density + 0.5f);
-		*height = (long)(mode->h * mode->pixel_density + 0.5f);
+		int pixel_width = 0, pixel_height = 0;
+
+		SDL_GetWindowSizeInPixels(platform_window, &pixel_width, &pixel_height);
+		if (pixel_width <= 0 || pixel_height <= 0)
+		{
+			*width = last_width;
+			*height = last_height;
+			return last_width > 0;
+		}
+		*width = pixel_width;
+		*height = pixel_height;
+		fullscreen = platform_window_fullscreen();
 	}
+	else
+	{
+		if (!platform_sdl_initialize())
+			return FALSE;
+		fullscreen = platform_fullscreen_setting();
+		platform_window_size_setting(width, height);
+		if (fullscreen && !platform_display_size(SDL_GetPrimaryDisplay(), width, height))
+			return FALSE;
+	}
+	/* (fullscreen's display is at the resolution already, where it has that
+	mode: platform_fullscreen_kind_apply; borderless's is scaled to) */
+	platform_resolution_setting(&resolution_width, &resolution_height);
+	if (fullscreen && resolution_width && resolution_width <= *width && resolution_height <= *height)
+	{
+		*width = resolution_width;
+		*height = resolution_height;
+	}
+	last_width = *width;
+	last_height = *height;
 	return TRUE;
 }
 
-#endif
-/* parse a WIDTHxHEIGHT setting */
-static BOOL platform_size_parse(const char *value, long *width, long *height)
-{
-	char *end;
-	long w, h;
-
-	if (!value || !*value)
-		return FALSE;
-
-	w = strtol(value, &end, 10);
-	if (end == value || (*end != 'x' && *end != 'X'))
-		return FALSE;
-
-	h = strtol(end + 1, &end, 10);
-	if (*end || w < 1 || h < 1)
-		return FALSE;
-
-	*width = w;
-	*height = h;
-	return TRUE;
-}
-
-/* the configured fullscreen resolution, if one is set */
-static void platform_resolution_setting(long *width, long *height)
-{
-	const char *value = config_string("display.resolution");
-
-	*width = 0;
-	*height = 0;
-
-	if (value)
-		platform_size_parse(value, width, height);
-}
-
-/* the configured window size, or the default 640x480 */
-static void platform_window_size_setting(long *width, long *height)
-{
-	const char *value = config_string("display.window_size");
-
-	if (!value || !platform_size_parse(value, width, height))
-	{
-		*width = 640;
-		*height = 480;
-	}
-}
-
-/* the display's usable pixel size */
-static BOOL platform_display_size(SDL_DisplayID display, long *width, long *height)
-{
-	const SDL_DisplayMode *mode;
-
-	if (!display)
-		return FALSE;
-
-	mode = SDL_GetDesktopDisplayMode(display);
-	if (!mode)
-		return FALSE;
-
-	*width = (long)(mode->w * mode->pixel_density + 0.5f);
-	*height = (long)(mode->h * mode->pixel_density + 0.5f);
-	return *width > 0 && *height > 0;
-}
-
-static int platform_resolution_add(long *widths, long *heights, int count, int maximum,
-	long width, long height)
+/* the size added to the list unless it has it already; the count */
+static int platform_resolution_add(long *widths, long *heights, int count, int maximum, long width, long height)
 {
 	int index;
 
@@ -553,75 +815,62 @@ static int platform_resolution_add(long *widths, long *heights, int count, int m
 
 int platform_display_resolutions(long *widths, long *heights, int maximum)
 {
+	SDL_DisplayID display;
+	SDL_DisplayMode **modes;
 	long display_width, display_height, width, height;
-	int count = 0;
+	int mode_count = 0, count = 0, index;
 
 	if (maximum < 1 || !platform_sdl_initialize())
 		return 0;
-
-	if (!platform_display_size(
-			SDL_GetPrimaryDisplay(),
-			&display_width, &display_height))
+	display = platform_window ? SDL_GetDisplayForWindow(platform_window) : 0;
+	if (!display)
+		display = SDL_GetPrimaryDisplay();
+	if (!platform_display_size(display, &display_width, &display_height))
 		return 0;
-
-	/*
-	 * Keep the resolution list independent of SDL's fullscreen-mode
-	 * enumeration. The guest SDL layer does not expose
-	 * SDL_GetFullscreenDisplayModes.
-	 */
-	static const short offered[][2] =
+	modes = SDL_GetFullscreenDisplayModes(display, &mode_count);
+	for (index = 0; modes && index < mode_count; index++)
 	{
-		{ 640, 480 },
-		{ 800, 600 },
-		{ 1024, 768 },
-		{ 1280, 720 },
-		{ 1280, 800 },
-		{ 1280, 960 },
-		{ 1440, 900 },
-		{ 1600, 900 },
-		{ 1680, 1050 },
-		{ 1920, 1080 },
-		{ 1920, 1200 },
-		{ 2560, 1440 },
-		{ 2560, 1600 },
-		{ 3840, 2160 }
-	};
-
-	for (unsigned int index = 0;
-		index < sizeof(offered) / sizeof(*offered);
-		index++)
-	{
-		width = offered[index][0];
-		height = offered[index][1];
-
-		if (width <= display_width && height <= display_height)
-			count = platform_resolution_add(
-				widths, heights, count, maximum, width, height);
+		width = (long)(modes[index]->w * modes[index]->pixel_density + 0.5f);
+		height = (long)(modes[index]->h * modes[index]->pixel_density + 0.5f);
+		if (width >= 640 && height >= 480 && width <= display_width && height <= display_height &&
+			(width != display_width || height != display_height))
+		{
+			count = platform_resolution_add(widths, heights, count, maximum, width, height);
+		}
 	}
-
+	SDL_free(modes);
+	/* (the one set, though this display has no such mode, so that Video
+	Setup shows it) */
 	platform_resolution_setting(&width, &height);
-	if (width && height)
-		count = platform_resolution_add(
-			widths, heights, count, maximum, width, height);
+	if (width && (width != display_width || height != display_height))
+		count = platform_resolution_add(widths, heights, count, maximum, width, height);
+	/* largest first */
+	for (index = 1; index < count; index++)
+	{
+		int place;
 
+		width = widths[index];
+		height = heights[index];
+		for (place = index; place > 0 && (widths[place - 1] < width ||
+			(widths[place - 1] == width && heights[place - 1] < height)); place--)
+		{
+			widths[place] = widths[place - 1];
+			heights[place] = heights[place - 1];
+		}
+		widths[place] = width;
+		heights[place] = height;
+	}
 	return count;
 }
 
 /* Video Setup's window sizes, by shape (4:3, 16:10, 16:9, 21:9), each from
-the smallest. */
+the smallest */
 static const short platform_window_sizes_offered[][2] =
 {
-	{ 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1280, 960 },
-	{ 1600, 1200 }, { 1920, 1440 }, { 2560, 1920 },
-
-	{ 1280, 800 }, { 1440, 900 }, { 1680, 1050 },
-	{ 1920, 1200 }, { 2560, 1600 },
-
-	{ 1280, 720 }, { 1600, 900 }, { 1920, 1080 },
-	{ 2560, 1440 }, { 3840, 2160 },
-
-	{ 2560, 1080 }, { 3440, 1440 }, { 3840, 1600 },
-	{ 5120, 2160 },
+	{ 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1280, 960 }, { 1600, 1200 }, { 1920, 1440 }, { 2560, 1920 },
+	{ 1280, 800 }, { 1440, 900 }, { 1680, 1050 }, { 1920, 1200 }, { 2560, 1600 },
+	{ 1280, 720 }, { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 }, { 3840, 2160 },
+	{ 2560, 1080 }, { 3440, 1440 }, { 3840, 1600 }, { 5120, 2160 },
 };
 
 int platform_window_sizes(long *widths, long *heights, int maximum)
@@ -633,29 +882,44 @@ int platform_window_sizes(long *widths, long *heights, int maximum)
 
 	if (maximum < 1 || !platform_sdl_initialize())
 		return 0;
-
 	display = platform_window ? SDL_GetDisplayForWindow(platform_window) : 0;
 	if (!display)
 		display = SDL_GetPrimaryDisplay();
-
-	if (!display || !platform_display_size(display, &width, &height))
-		width = height = 0;
-
-	for (index = 0;
-		index < (int)(sizeof(platform_window_sizes_offered) /
-			sizeof(*platform_window_sizes_offered));
+	if (!display || !SDL_GetDisplayUsableBounds(display, &usable))
+		usable.w = usable.h = 0;
+	for (index = 0; index < (int)(sizeof(platform_window_sizes_offered) / sizeof(*platform_window_sizes_offered));
 		index++)
 	{
-		long offered_width = platform_window_sizes_offered[index][0];
-		long offered_height = platform_window_sizes_offered[index][1];
-
-		if (!index || (offered_width <= width && offered_height <= height))
-			count = platform_resolution_add(widths, heights, count, maximum,
-				offered_width, offered_height);
+		width = platform_window_sizes_offered[index][0];
+		height = platform_window_sizes_offered[index][1];
+		/* (the Xbox's own whatever the desktop's size) */
+		if (!index || (width <= usable.w && height <= usable.h))
+			count = platform_resolution_add(widths, heights, count, maximum, width, height);
 	}
-
-	return count;
+	/* (the one set, though it is none of them or too big for this desktop,
+	so that Video Setup shows it) */
+	platform_window_size_setting(&width, &height);
+	return platform_resolution_add(widths, heights, count, maximum, width, height);
 }
+
+#else
+int platform_display_resolutions(long *widths, long *heights, int maximum)
+{
+	(void)widths;
+	(void)heights;
+	(void)maximum;
+	return 0;
+}
+
+int platform_window_sizes(long *widths, long *heights, int maximum)
+{
+	(void)widths;
+	(void)heights;
+	(void)maximum;
+	return 0;
+}
+
+#endif
 
 /* ---------- audio devices (Settings > Audio: audio.output_device,
 audio.input_device) */
@@ -723,10 +987,169 @@ SDL_AudioDeviceID platform_audio_device(int recording, const char *name)
 }
 #endif
 
-
-/* the window's size (display.window_size, as the window was made or last
-resized: platform_display_apply) */
+#ifndef HALO_ANDROID
+/* the window's size (platform_window_size_setting), as the window was made
+or last resized: platform_display_apply */
 static long platform_window_width = -1, platform_window_height = -1;
+/* the last configured mode; F11 can change the window independently */
+static int platform_window_mode = _display_mode_windowed;
+
+/* display.hdr_output: the window's pixels are half floats (scRGB), -1 until
+the window is first made; FALSE once the driver has none */
+static int platform_float_window = -1;
+
+/* the attributes of a window with (or without) floating-point pixels */
+static void platform_float_window_attributes(BOOL floating)
+{
+	int size = floating ? 16 : 8;
+
+	SDL_GL_SetAttribute(SDL_GL_FLOATBUFFERS, floating ? 1 : 0);
+	SDL_GL_SetAttribute(SDL_GL_RED_SIZE, size);
+	SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, size);
+	SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, size);
+	SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, size);
+}
+
+/* a window with floating-point pixels that cannot be made, or have a
+context made for it: one without them (on Windows a window's pixel format
+is set once, so a new window) */
+static BOOL platform_float_window_refused(void)
+{
+	if (platform_float_window != TRUE)
+		return FALSE;
+	platform_log("HDR output: no floating-point window (%s); the window is SDR", SDL_GetError());
+	platform_float_window = FALSE;
+	platform_float_window_attributes(FALSE);
+	if (platform_window)
+		SDL_DestroyWindow(platform_window);
+	platform_window = NULL;
+	return TRUE;
+}
+
+BOOL platform_video_hdr(float *sdr_white, float *headroom)
+{
+	SDL_PropertiesID properties = platform_window ? SDL_GetWindowProperties(platform_window) : 0;
+	BOOL enabled = properties && SDL_GetBooleanProperty(properties, SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false);
+
+	*sdr_white = properties ? SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT, 1.0f) : 1.0f;
+	*headroom = properties ? SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 1.0f) : 1.0f;
+	if (!(*sdr_white > 0.0f))
+		*sdr_white = 1.0f;
+	if (!(*headroom >= 1.0f))
+		*headroom = 1.0f;
+	return enabled;
+}
+#endif
+
+#ifndef HALO_ANDROID
+#ifndef HALO_GLES
+/* ---------- the menus' cursor
+
+The blue arrow the menus show for the mouse, in place of the system's. Halo
+PC drew its cursor in the menus' 640 x 480, so it took the same part of the
+screen at any resolution; this one is made again whenever the window's size
+in pixels changes (menu_cursor_fit, from platform_pump_events). */
+
+/* the arrow's height in the menus' 480 lines (72 pixels at 1080p) */
+#define MENU_CURSOR_HEIGHT 32
+/* the arrow's tip in the picture, past its soft edge: the click point */
+#define MENU_CURSOR_TIP 2
+
+static SDL_Surface *menu_cursor_picture;
+static SDL_Cursor *menu_cursor;
+static int menu_cursor_height;
+
+/* the picture at a height, halved first while it is twice that or more (one
+linear scaling to less than half the size skips pixels) */
+static SDL_Surface *menu_cursor_scale(int height)
+{
+	int width = (menu_cursor_picture->w * height + menu_cursor_picture->h / 2) / menu_cursor_picture->h;
+	SDL_Surface *surface = SDL_DuplicateSurface(menu_cursor_picture);
+
+	while (surface && surface->h / 2 >= height)
+	{
+		SDL_Surface *half = SDL_ScaleSurface(surface, surface->w / 2, surface->h / 2, SDL_SCALEMODE_LINEAR);
+
+		SDL_DestroySurface(surface);
+		surface = half;
+	}
+	if (surface && surface->h != height)
+	{
+		SDL_Surface *sized = SDL_ScaleSurface(surface, width > 0 ? width : 1, height, SDL_SCALEMODE_LINEAR);
+
+		SDL_DestroySurface(surface);
+		surface = sized;
+	}
+	return surface;
+}
+
+/* the cursor made for the window's size, when that has changed: its height
+the part of the window the menus' 480 lines take (their 4:3 fits a window of
+another shape), in pixels; where the desktop counts in points (macOS, Wayland
+at a scale) the cursor is that size in points, with the pixels' image as its
+alternate */
+static void menu_cursor_fit(void)
+{
+	int width = 0, height = 0, lines, cursor_height;
+	float density;
+	SDL_Surface *pixels, *points;
+	SDL_Cursor *cursor = NULL;
+
+	if (!menu_cursor_picture || !SDL_GetWindowSizeInPixels(platform_window, &width, &height) ||
+		width <= 0 || height <= 0)
+		return;
+	lines = height < width * 3 / 4 ? height : width * 3 / 4;
+	cursor_height = lines * MENU_CURSOR_HEIGHT / 480;
+	if (cursor_height < 16)
+		cursor_height = 16;
+	if (cursor_height == menu_cursor_height)
+		return;
+	menu_cursor_height = cursor_height;
+	density = SDL_GetWindowPixelDensity(platform_window);
+	pixels = menu_cursor_scale(cursor_height);
+	points = density > 1.0f ? menu_cursor_scale((int)(cursor_height / density + 0.5f)) : pixels;
+	if (pixels && points && (points == pixels || SDL_AddSurfaceAlternateImage(points, pixels)))
+		cursor = SDL_CreateColorCursor(points,
+			(MENU_CURSOR_TIP * points->w + menu_cursor_picture->w / 2) / menu_cursor_picture->w,
+			(MENU_CURSOR_TIP * points->h + menu_cursor_picture->h / 2) / menu_cursor_picture->h);
+	if (cursor && SDL_SetCursor(cursor))
+	{
+		SDL_DestroyCursor(menu_cursor);
+		menu_cursor = cursor;
+	}
+	else
+	{
+		platform_log("cannot set the menus' cursor: %s", SDL_GetError());
+		if (cursor)
+			SDL_DestroyCursor(cursor);
+	}
+	if (points != pixels)
+		SDL_DestroySurface(points);
+	SDL_DestroySurface(pixels);
+}
+
+/* A controller's buttons or sticks, used while a menu is up, hide the
+cursor, and the mouse moved or clicked shows it again, so a player on a
+controller has no arrow left over the menus; a menu opened while the
+controller was used last opens without it
+(platform_ui_pointer_set_active). */
+static BOOL menu_cursor_controller;
+
+static void menu_cursor_controller_used(BOOL in_menus)
+{
+	menu_cursor_controller = TRUE;
+	if (in_menus && SDL_CursorVisible())
+		SDL_HideCursor();
+}
+
+static void menu_cursor_mouse_used(BOOL in_menus)
+{
+	menu_cursor_controller = FALSE;
+	if (in_menus && !SDL_CursorVisible())
+		SDL_ShowCursor();
+}
+#endif
+#endif
 
 BOOL platform_video_initialize(unsigned long width, unsigned long height)
 {
@@ -734,12 +1157,20 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 
 	if (platform_window)
 		return TRUE;
+	platform_video_tried = TRUE;
 	if (!platform_sdl_initialize())
 		return FALSE;
-
-	(void)width;
-	(void)height;
-	platform_window_size_setting(&platform_window_width, &platform_window_height);
+#ifndef HALO_ANDROID
+#ifdef HALO_WEB
+	/* (a browser's canvas has 8 bits a channel) */
+	platform_float_window = FALSE;
+#else
+	if (platform_float_window < 0)
+		platform_float_window = config_boolean("display.hdr") && config_boolean("display.hdr_output");
+#endif
+	if (platform_float_window)
+		platform_float_window_attributes(TRUE);
+#endif
 
 #ifdef HALO_GLES
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -753,6 +1184,12 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
+#ifdef HALO_WEB
+	/* an opaque canvas: the game keeps scratch values in destination alpha,
+	which a page would otherwise blend the picture by (black, or the page's
+	colours through it) */
+	SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
+#endif
 	if (config_boolean("debug.gl_debug"))
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
 #if !defined(HALO_ANDROID) && !defined(_WIN32)
@@ -764,13 +1201,22 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 #endif
 
 #ifdef HALO_ANDROID
-	platform_window = SDL_CreateWindow("Halo", (int)(width * scale), (int)(height * scale),
-		SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+	{
+		int scale = (int)config_integer("display.window_scale");
+
+		if (scale < 1)
+			scale = 1;
+		platform_window = SDL_CreateWindow("Halo", (int)(width * scale), (int)(height * scale),
+			SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+	}
 #else
 	/* fullscreen (either kind) unless display.mode is the window, which F11
 	switches to and from: display.window_size, whatever shape the fullscreen
 	picture has. The game draws at the size platform_screen_mode gives
 	(d3d8_gl.c). */
+	(void)width;
+	(void)height;
+	platform_window_size_setting(&platform_window_width, &platform_window_height);
 	platform_window = SDL_CreateWindow("Halo", (int)platform_window_width, (int)platform_window_height,
 		SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
 		(config_boolean("debug.hidden_window") ? SDL_WINDOW_HIDDEN : 0) |
@@ -778,11 +1224,42 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 #endif
 	if (!platform_window)
 	{
+#ifndef HALO_ANDROID
+		if (platform_float_window_refused())
+			return platform_video_initialize(width, height);
+#endif
 		platform_log("SDL_CreateWindow failed: %s", SDL_GetError());
 		return FALSE;
 	}
 #ifndef HALO_ANDROID
+#ifndef HALO_GLES
+	/* the game's icon, which the desktop shows for the window (on Windows
+	also halo.exe's own, port/windows/halo.rc; a web page has its own) */
+	if (platform_window_icon_size)
+	{
+		SDL_Surface *icon = SDL_LoadPNG_IO(SDL_IOFromConstMem(platform_window_icon, platform_window_icon_size), true);
+
+		if (!icon || !SDL_SetWindowIcon(platform_window, icon))
+			platform_log("cannot set the window's icon: %s", SDL_GetError());
+		SDL_DestroySurface(icon);
+	}
+	/* the pointer the menus show (platform_ui_pointer_set_active), in place
+	of the system's, at the window's size */
+	if (platform_menu_cursor_size && !menu_cursor_picture)
+	{
+		menu_cursor_picture = SDL_LoadPNG_IO(SDL_IOFromConstMem(platform_menu_cursor, platform_menu_cursor_size), true);
+		if (!menu_cursor_picture)
+			platform_log("cannot read the menus' cursor: %s", SDL_GetError());
+	}
+	menu_cursor_height = 0;
+	menu_cursor_fit();
+#endif
+	platform_fullscreen_requested = platform_fullscreen_setting();
+	platform_window_mode = platform_display_mode();
 	platform_fullscreen_kind_apply();
+#endif
+#ifdef HALO_WINDOWS
+	win32_window_borderless_apply(platform_window);
 #endif
 	platform_gl_context = SDL_GL_CreateContext(platform_window);
 #ifdef HALO_GLES
@@ -793,6 +1270,10 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 		platform_gl_context = SDL_GL_CreateContext(platform_window);
 	}
+#endif
+#ifndef HALO_ANDROID
+	if (!platform_gl_context && platform_float_window_refused())
+		return platform_video_initialize(width, height);
 #endif
 	if (!platform_gl_context)
 	{
@@ -806,50 +1287,49 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	(void)version;
 	platform_event_thread = SDL_GetCurrentThreadID();
 	platform_log("OpenGL %s on %s", (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER));
+#if defined(__linux__) && !defined(HALO_ANDROID)
+	{
+		const char *renderer = (const char *)glGetString(GL_RENDERER);
+
+		/* (Mesa's software renderers: no GPU driver for this window) */
+		if (renderer && (strstr(renderer, "llvmpipe") || strstr(renderer, "softpipe")))
+			platform_log("OpenGL is drawn on the processor, not the GPU (video driver %s): "
+				"refer to \"NVIDIA on Wayland\" in port/linux/README.md", SDL_GetCurrentVideoDriver());
+	}
+#endif
 #ifndef HALO_ANDROID
+	{
+		float sdr_white, headroom;
+		BOOL hdr = platform_video_hdr(&sdr_white, &headroom);
+
+		platform_log("display: HDR %s (SDR white %.2f, headroom %.2f), %s window", hdr ? "on" : "off", sdr_white,
+			headroom, platform_float_window ? "floating-point" : "8-bit");
+	}
 	platform_mouse_capture(TRUE);
 #endif
 	return TRUE;
 }
 
-#ifndef HALO_ANDROID
-/* the pixels the picture goes to: the display's in fullscreen, else the
-window's */
-BOOL platform_output_size(long *width, long *height)
-{
-	if (platform_screen_mode(width, height))
-		return TRUE;
-	if (platform_window)
-	{
-		int w = 0, h = 0;
-
-		SDL_GetWindowSizeInPixels(platform_window, &w, &h);
-		if (w > 0 && h > 0)
-		{
-			*width = w;
-			*height = h;
-			return TRUE;
-		}
-		return FALSE;
-	}
-	platform_window_size_setting(width, height);
-	return TRUE;
-}
-#endif
 /* display.mode, display.resolution (fullscreen's display mode),
 display.window_size (when it changes: the window can be resized) and
-display.vsync, as Settings has written them */
+display.vsync, as Settings has written them; display.resolution_scaling
+and borderless's resolution are taken up between frames
+(halo_screen_commit) */
 void platform_display_apply(void)
 {
 #ifndef HALO_ANDROID
-	BOOL fullscreen = platform_fullscreen_setting();
+	int mode = platform_display_mode();
 	long width, height;
 
 	if (!platform_window)
 		return;
 	platform_fullscreen_kind_apply();
-	if (((SDL_GetWindowFlags(platform_window) & SDL_WINDOW_FULLSCREEN) != 0) != (fullscreen != FALSE))
-		SDL_SetWindowFullscreen(platform_window, fullscreen ? true : false);
+	/* Saving unrelated settings must preserve the window mode chosen by F11. */
+	if (mode != platform_window_mode)
+	{
+		platform_window_mode = mode;
+		platform_window_set_fullscreen(platform_fullscreen_setting());
+	}
 	platform_window_size_setting(&width, &height);
 	if (width != platform_window_width || height != platform_window_height)
 	{
@@ -863,7 +1343,6 @@ void platform_display_apply(void)
 #endif
 	SDL_GL_SetSwapInterval(config_boolean("display.vsync") ? 1 : 0);
 }
-
 
 void platform_video_drawable_size(int *width, int *height)
 {
@@ -902,37 +1381,110 @@ static Uint64 frame_interval_ns(void)
 }
 
 #endif
+#ifdef HALO_WEB
+#include "web_shared.h"
+
+/* port/web/src/web_main.c's: the frames shown, which the page reads; and
+web_library.js's: a line for the page (2: an invite link to offer) */
+void web_frame_shown(void);
+void web_js_post(int kind, const char *text);
+#endif
 
 void platform_video_swap(void)
 {
+	Uint64 swap_start = SDL_GetTicks(), swap_time;
 #ifndef HALO_ANDROID
 	static Uint64 next_frame;
 	Uint64 interval, now;
 #endif
+#ifdef HALO_WINDOWS
+	/* SDL can restore its fullscreen styles on a mode or focus change.
+	Keep borderless on the desktop before the driver presents a frame. */
+	win32_window_borderless_apply(platform_window);
+#endif
 
 	SDL_GL_SwapWindow(platform_window);
-
+	/* (a frame the graphics driver held for seconds: the game froze, and
+	online, a host stops hearing a machine after a few; the log says where) */
+	swap_time = SDL_GetTicks() - swap_start;
+	if (swap_time >= 2000)
+		platform_log("display: showing a frame took %.1f s in the graphics driver", (double)swap_time / 1000.0);
+#ifdef HALO_WEB
+	web_frame_shown();
+#endif
 #ifndef HALO_ANDROID
 	interval = frame_interval_ns();
 	if (!interval)
 		return;
-
 	now = SDL_GetTicksNS();
 	if (next_frame > now)
 	{
 		SDL_DelayPrecise(next_frame - now);
 		now = next_frame;
 	}
-
-	/* a frame more than an interval late starts the count again */
+	/* (a frame more than an interval late starts the count again) */
 	next_frame = now - next_frame > interval ? now + interval : next_frame + interval;
 #endif
 }
 
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
+/* when SDL_SetWindowRelativeMouseMode has no XInput2 (32-bit libSDL3 on X11
+without 32-bit libXi.so.6), the mouse is held with a hidden cursor, a window
+grab and a warp back to the middle after each move */
+static BOOL mouse_warp_capture;
+static int mouse_warp_x;
+static int mouse_warp_y;
+#endif
+
 void platform_mouse_capture(BOOL capture)
 {
-	if (platform_window)
-		SDL_SetWindowRelativeMouseMode(platform_window, capture ? true : false);
+#ifdef HALO_WEB
+	/* (for the page, which takes the pointer lock back on a click:
+	web_shared.h) */
+	__atomic_store_n(&web_shared[_web_mouse_wanted], capture ? 1 : 0, __ATOMIC_RELAXED);
+#endif
+	if (!platform_window)
+		return;
+#if defined(HALO_ANDROID) || defined(HALO_WEB)
+	SDL_SetWindowRelativeMouseMode(platform_window, capture ? true : false);
+#else
+	/* (without the focus, the mouse is taken when the focus comes back:
+	SDL_EVENT_WINDOW_FOCUS_GAINED. SDL_SetWindowRelativeMouseMode would only
+	set SDL_WINDOW_MOUSE_RELATIVE_MODE then, without testing XInput2, and
+	later calls would find it set and return at once) */
+	if (!capture || SDL_GetKeyboardFocus() != platform_window)
+	{
+		mouse_warp_capture = FALSE;
+		SDL_SetWindowRelativeMouseMode(platform_window, false);
+		SDL_SetWindowMouseGrab(platform_window, false);
+		SDL_ShowCursor();
+		return;
+	}
+	if (SDL_SetWindowRelativeMouseMode(platform_window, true))
+	{
+		if (mouse_warp_capture)
+		{
+			mouse_warp_capture = FALSE;
+			SDL_SetWindowMouseGrab(platform_window, false);
+			SDL_ShowCursor();
+		}
+		return;
+	}
+	mouse_warp_capture = TRUE;
+	SDL_HideCursor();
+	SDL_SetWindowMouseGrab(platform_window, true);
+	{
+		int width = 0, height = 0;
+
+		SDL_GetWindowSize(platform_window, &width, &height);
+		if (width > 0 && height > 0)
+		{
+			mouse_warp_x = width / 2;
+			mouse_warp_y = height / 2;
+			SDL_WarpMouseInWindow(platform_window, (float)mouse_warp_x, (float)mouse_warp_y);
+		}
+	}
+#endif
 }
 
 /* ---------- keyboard translation */
@@ -1124,7 +1676,6 @@ void platform_clipboard_set(const char *text)
 	SDL_SetClipboardText(text);
 }
 
-
 /* puts a new invite on the clipboard, and joins one found there when the
 game comes to the front */
 static void platform_invite_clipboard(BOOL look)
@@ -1135,9 +1686,15 @@ static void platform_invite_clipboard(BOOL look)
 
 	if (invite)
 	{
+#ifdef HALO_WEB
+		/* (a page may write the clipboard only when it is clicked: the page
+		shows the link, with a button that copies it) */
+		web_js_post(2, invite);
+#else
 		SDL_SetClipboardText(invite);
 		snprintf(seen, sizeof(seen), "%s", invite);
 		platform_log("Internet play: the invite link is on the clipboard");
+#endif
 #ifdef HALO_ANDROID
 		SDL_ShowAndroidToast("Hosting: the invite link is on the clipboard", 1, -1, 0, 0);
 #endif
@@ -1149,7 +1706,9 @@ static void platform_invite_clipboard(BOOL look)
 		if (text && strcmp(text, seen) && strlen(text) < sizeof(seen))
 		{
 			snprintf(seen, sizeof(seen), "%s", text);
-			if (p2p_join_invite(text))
+			/* (a link, not a bare code: 64 hex digits alone are as often a
+			checksum copied for something else) */
+			if (platform_text_has_invite_link(text) && p2p_join_invite(text))
 			{
 #ifdef HALO_ANDROID
 				SDL_ShowAndroidToast("Joining the invite on the clipboard", 1, -1, 0, 0);
@@ -1180,8 +1739,84 @@ void platform_show_message(const char *title, const char *message)
 	pthread_mutex_lock(&platform_message_lock);
 	snprintf(platform_message_title, sizeof(platform_message_title), "%s", title);
 	snprintf(platform_message_text, sizeof(platform_message_text), "%s", message);
+	/* (streamer mode's words hidden here too: a map's or a mod's name) */
+	text_filter_utf8(platform_message_title);
+	text_filter_utf8(platform_message_text);
 	platform_message_pending = TRUE;
 	pthread_mutex_unlock(&platform_message_lock);
+}
+
+#ifdef HALO_WEB
+/* web_library.js's: the page asks, and writes the answer in web_shared's
+_web_answer */
+void web_js_ask(const char *title, const char *text, const char *labels);
+#endif
+
+int platform_ask(const char *title, const char *text, const char *const *labels, int count, int default_index)
+{
+	/* (streamer mode's words hidden here too: mods' names) */
+	static char shown_title[128];
+	static char shown_text[4096];
+	static char shown_labels[3][128];
+	const char *shown[3];
+	int index;
+#ifdef HALO_WEB
+	char joined[512] = "";
+#else
+	SDL_MessageBoxButtonData buttons[3];
+	SDL_MessageBoxData question;
+	int answer = -1;
+#endif
+
+	if (count > 3)
+		count = 3;
+	snprintf(shown_title, sizeof(shown_title), "%s", title);
+	snprintf(shown_text, sizeof(shown_text), "%s", text);
+	text_filter_utf8(shown_title);
+	text_filter_utf8(shown_text);
+	for (index = 0; index < count; index++)
+	{
+		snprintf(shown_labels[index], sizeof(shown_labels[index]), "%s", labels[index]);
+		text_filter_utf8(shown_labels[index]);
+		shown[index] = shown_labels[index];
+	}
+	title = shown_title;
+	text = shown_text;
+	labels = shown;
+#ifdef HALO_WEB
+	/* (the page's dialog: the game's thread waits for the player there, as
+	SDL's box would, which a page's worker cannot show) */
+	for (index = 0; index < count; index++)
+	{
+		size_t length = strlen(joined);
+
+		snprintf(joined + length, sizeof(joined) - length, "%s%s", index ? "\n" : "", labels[index]);
+	}
+	__atomic_store_n(&web_shared[_web_answer], -1, __ATOMIC_SEQ_CST);
+	web_js_ask(title, text, joined);
+	while (__atomic_load_n(&web_shared[_web_answer], __ATOMIC_SEQ_CST) < 0)
+		SDL_Delay(50);
+	(void)default_index;
+	return __atomic_load_n(&web_shared[_web_answer], __ATOMIC_SEQ_CST);
+#else
+	for (index = 0; index < count; index++)
+	{
+		buttons[index].flags = index == default_index ?
+			SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT : 0;
+		buttons[index].buttonID = index;
+		buttons[index].text = labels[index];
+	}
+	question.flags = SDL_MESSAGEBOX_WARNING;
+	question.window = NULL;
+	question.title = title;
+	question.message = text;
+	question.numbuttons = count;
+	question.buttons = buttons;
+	question.colorScheme = NULL;
+	if (!SDL_ShowMessageBox(&question, &answer))
+		return -1;
+	return answer;
+#endif
 }
 
 static void platform_show_pending_message(void)
@@ -1203,30 +1838,32 @@ static void platform_show_pending_message(void)
 #else
 	{
 		/* (a box cannot show above a fullscreen game) */
-		int fullscreen = (SDL_GetWindowFlags(platform_window) & SDL_WINDOW_FULLSCREEN) != 0;
+		BOOL fullscreen = platform_window_fullscreen();
 
 		if (fullscreen)
-			SDL_SetWindowFullscreen(platform_window, false);
+			platform_window_set_fullscreen(FALSE);
 		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, title, text, platform_window);
 		if (fullscreen)
-			SDL_SetWindowFullscreen(platform_window, true);
+			platform_window_set_fullscreen(TRUE);
 	}
 #endif
 }
 
 /* ---------- events */
 
-
 #ifdef HALO_MACOS
-/* whether Command is held, from the key events (Command-W's close) */
+/* Command-W must not close the game while W is held for movement. */
 static BOOL platform_command_held;
 #endif
+
 /* quits as closing the window does, when the events are next read (the
-menus' Quit: port/linux/game/menu_functions.c); Android's menus have none,
-as the system closes its apps */
+menus' Quit: port/linux/game/menu_functions.c); on Android at once */
 void platform_request_quit(void)
 {
-#ifndef HALO_ANDROID
+#ifdef HALO_ANDROID
+	/* (the guest has no SDL_PushEvent: exit ends the process, host_exit) */
+	exit(EXIT_SUCCESS);
+#else
 	SDL_Event event;
 
 	memset(&event, 0, sizeof(event));
@@ -1281,7 +1918,6 @@ BOOL platform_scoreboard_pointer(BOOL offered, struct platform_ui_pointer *point
 }
 #endif
 
-
 void platform_scoreboard_scroll(int open, long *notches, long *pages)
 {
 	Uint64 now = SDL_GetTicks();
@@ -1307,18 +1943,31 @@ void platform_scoreboard_scroll(int open, long *notches, long *pages)
 	pthread_mutex_unlock(&input_lock);
 }
 
-
-void platform_pump_events(void)
+void platform_screenshot_request(void)
 {
-	/* debug.exit_after (seconds) ends the game that long after the window
-	opens, as closing it does (tools/pgo_train.py) */
-	static Uint64 exit_ticks = (Uint64)-1;
-	SDL_Event event;
-	static BOOL looked_at_clipboard;
-	BOOL look_at_clipboard = !looked_at_clipboard;
+	pthread_mutex_lock(&input_lock);
+	screenshot_requested = TRUE;
+	pthread_mutex_unlock(&input_lock);
+}
 
-	if (!platform_window || SDL_GetCurrentThreadID() != platform_event_thread)
-		return;
+BOOL platform_screenshot_take_request(void)
+{
+	BOOL requested;
+
+	pthread_mutex_lock(&input_lock);
+	requested = screenshot_requested;
+	screenshot_requested = FALSE;
+	pthread_mutex_unlock(&input_lock);
+	return requested;
+}
+
+/* debug.exit_after (seconds) ends the game that long after the window
+opens (without one, after the first frame), as closing it does
+(tools/pgo_train.py, net_compare.py) */
+static void exit_after_check(void)
+{
+	static Uint64 exit_ticks = (Uint64)-1;
+
 	if (exit_ticks == (Uint64)-1)
 	{
 		double seconds = config_real("debug.exit_after");
@@ -1330,11 +1979,70 @@ void platform_pump_events(void)
 		platform_log("exiting after debug.exit_after");
 		exit(EXIT_SUCCESS);
 	}
+}
+
+/* the events without a window (debug.null_renderer, or no display): on the
+thread that first asks (the game's, as its frames end), debug.exit_after, a
+request to quit (SIGINT and SIGTERM, which SDL makes quit events: else the
+game would not stop for them), and the updater's question if
+debug.update_answer answers it (a dialog with no game window to stand
+over is never shown); the other events are of no window, and dropped */
+static void platform_pump_events_headless(void)
+{
+	static SDL_ThreadID thread;
+	SDL_Event event;
+
+	if (!thread)
+		thread = SDL_GetCurrentThreadID();
+	if (SDL_GetCurrentThreadID() != thread)
+		return;
+	/* (a dedicated server stops itself: server_director.c) */
+	if (!halo_server_mode())
+		exit_after_check();
+#ifndef HALO_ANDROID
+	if (config_string("debug.update_answer")[0])
+		updater_poll(NULL);
+#endif
+	while (SDL_PollEvent(&event))
+	{
+		if (event.type == SDL_EVENT_QUIT)
+		{
+			platform_log("asked to quit (no window)");
+			exit(EXIT_SUCCESS);
+		}
+	}
+}
+
+void platform_pump_events(void)
+{
+	SDL_Event event;
+	static BOOL looked_at_clipboard;
+	BOOL look_at_clipboard = !looked_at_clipboard;
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
+	BOOL mouse_needs_warp = FALSE;
+#endif
+	static int null_renderer = -1;
+
+	if (!platform_window)
+	{
+		if (null_renderer < 0)
+			null_renderer = config_boolean("debug.null_renderer") ? 1 : 0;
+		if (platform_sdl_started && (null_renderer || platform_video_tried))
+			platform_pump_events_headless();
+		return;
+	}
+	if (SDL_GetCurrentThreadID() != platform_event_thread)
+		return;
+	exit_after_check();
 	platform_show_pending_message();
+#if !defined(HALO_ANDROID) && !defined(HALO_GLES)
+	menu_cursor_fit();
+#endif
 #ifndef HALO_ANDROID
 	updater_poll(platform_window);
 	/* (Settings > Audio's output device, as it changes: dsound_sdl.c) */
 	dsound_sdl_output_device_check();
+	screen_keyboard_update();
 #endif
 	pthread_mutex_lock(&input_lock);
 #ifndef HALO_ANDROID
@@ -1350,13 +2058,10 @@ void platform_pump_events(void)
 		switch (event.type)
 		{
 #ifdef HALO_MACOS
-		/* the window's close button quits at once; Command-W (the menu's
-		Close, with Command held for the port's keys and W moving you
-		forward) does nothing */
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
 			if (platform_command_held)
 			{
-				notice("Command-W does not close the game: press Command-Q twice to quit");
+				platform_show_message("Halo", "Command-W does not close the game: press Command-Q twice to quit");
 				break;
 			}
 			pthread_mutex_unlock(&input_lock);
@@ -1365,8 +2070,6 @@ void platform_pump_events(void)
 #endif
 		case SDL_EVENT_QUIT:
 #ifdef HALO_MACOS
-			/* Command-Q quits on a second press within two seconds: Q is the
-			flashlight, and Command is held for the port's keys */
 			{
 				static Uint64 first_quit;
 				Uint64 now = SDL_GetTicks();
@@ -1374,7 +2077,7 @@ void platform_pump_events(void)
 				if (!first_quit || now - first_quit > 2000)
 				{
 					first_quit = now;
-					notice("press Command-Q again to quit");
+					platform_show_message("Halo", "press Command-Q again to quit");
 					break;
 				}
 			}
@@ -1384,90 +2087,74 @@ void platform_pump_events(void)
 			exit(EXIT_SUCCESS);
 		case SDL_EVENT_KEY_DOWN:
 		case SDL_EVENT_KEY_UP:
-		{
-			/* the port's keys: F7 to F12, or on macOS, whose own keys F11 and
-			the media keys are, Command with a letter (the letter then does
-			nothing in the game) */
-			SDL_Scancode action = event.key.scancode;
+			{
+				SDL_Scancode action = event.key.scancode;
+				BOOL game_key = TRUE;
 
 #ifdef HALO_MACOS
-			platform_command_held = event.key.scancode == SDL_SCANCODE_LGUI ||
-				event.key.scancode == SDL_SCANCODE_RGUI ? event.key.down : (event.key.mod & SDL_KMOD_GUI) != 0;
-			if (event.key.mod & SDL_KMOD_GUI)
-			{
-				switch (event.key.scancode)
+				platform_command_held = event.key.scancode == SDL_SCANCODE_LGUI ||
+					event.key.scancode == SDL_SCANCODE_RGUI ? event.key.down : (event.key.mod & SDL_KMOD_GUI) != 0;
+				if (event.key.mod & SDL_KMOD_GUI)
 				{
-				case SDL_SCANCODE_F: action = SDL_SCANCODE_F11; break;
-				case SDL_SCANCODE_R: action = SDL_SCANCODE_F8; break;
-				case SDL_SCANCODE_G: action = SDL_SCANCODE_F12; break;
-				case SDL_SCANCODE_P: action = SDL_SCANCODE_F7; break;
-				default: break;
+					switch (event.key.scancode)
+					{
+					case SDL_SCANCODE_F: action = SDL_SCANCODE_F11; game_key = FALSE; break;
+					case SDL_SCANCODE_R: action = SDL_SCANCODE_F8; game_key = FALSE; break;
+					case SDL_SCANCODE_G: action = SDL_SCANCODE_F12; game_key = FALSE; break;
+					case SDL_SCANCODE_P: action = SDL_SCANCODE_F7; game_key = FALSE; break;
+					default: break;
+					}
 				}
-			}
-			if (action == event.key.scancode)
 #endif
+			if (game_key && event.key.scancode < SDL_SCANCODE_COUNT)
 			{
-				if (binding_capture == _binding_capture_waiting && event.key.down && !event.key.repeat &&
-					event.key.scancode != SDL_SCANCODE_F11 && event.key.scancode != SDL_SCANCODE_F12)
-				{
-					binding_capture = _binding_capture_taken;
-					binding_taken_ms = SDL_GetTicks();
-					binding_capture_result = event.key.scancode == SDL_SCANCODE_ESCAPE ? 3 :
-						event.key.scancode == SDL_SCANCODE_DELETE ? 2 : 1;
-					binding_captured_input = event.key.scancode;
-					break;
-				}
-
-				if (event.key.scancode < SDL_SCANCODE_COUNT)
-				{
-					input_state.keys[event.key.scancode] = event.key.down;
-					if (event.key.down)
-						keys_pressed[event.key.scancode] = 1;
-				}
-				queue_keystroke(&event.key);
+				input_state.keys[event.key.scancode] = event.key.down;
+				if (event.key.down)
+					keys_pressed[event.key.scancode] = 1;
 			}
-
-
+			if (game_key && binding_capture == _binding_capture_waiting && event.key.down && !event.key.repeat &&
+				event.key.scancode != SDL_SCANCODE_F11 && event.key.scancode != SDL_SCANCODE_F12)
+			{
+				binding_capture = _binding_capture_taken;
+				binding_taken_ms = SDL_GetTicks();
+				binding_capture_result = event.key.scancode == SDL_SCANCODE_ESCAPE ? 3 :
+					event.key.scancode == SDL_SCANCODE_DELETE ? 2 : 1;
+				binding_captured_input = event.key.scancode;
+				break;
+			}
+			if (game_key)
+				queue_keystroke(&event.key);
 			if (SDL_GetTicks() < scoreboard_open_until_ms && event.key.down &&
 				(event.key.scancode == SDL_SCANCODE_PAGEUP || event.key.scancode == SDL_SCANCODE_PAGEDOWN))
 			{
 				scoreboard_pages += event.key.scancode == SDL_SCANCODE_PAGEDOWN ? 1 : -1;
 			}
-
 			/* F12 releases or recaptures the mouse */
 			if (event.key.down && !event.key.repeat && action == SDL_SCANCODE_F12)
 			{
 				input_state.mouse_released = !input_state.mouse_released;
 				platform_mouse_capture(!input_state.mouse_released && !input_state.ui_pointer &&
 					!scoreboard_pointer_active);
-				notice("mouse %s", input_state.mouse_released ? "released" : "captured");
-
 			}
-			/* F7 shows or hides the game's frames-a-second counter (its own
-			display_framerate: source/main/main.c) */
-			if (event.key.down && !event.key.repeat && action == SDL_SCANCODE_F7)
-			{
-				display_framerate = !display_framerate;
-				notice("frame rate counter: %s", display_framerate ? "on" : "off");
-			}
-			/* F8 steps through the resolutions (d3d8_gl.c) */
-			if (event.key.down && !event.key.repeat && action == SDL_SCANCODE_F8)
-				notice("resolution: %s", halo_screen_resolution_next());
 #ifndef HALO_ANDROID
 			/* F11 switches between fullscreen and the window (SDL keeps the
 			window's size and place while fullscreen) */
 			if (event.key.down && !event.key.repeat && action == SDL_SCANCODE_F11)
 			{
-				bool fullscreen = !(SDL_GetWindowFlags(platform_window) & SDL_WINDOW_FULLSCREEN);
-
-				SDL_SetWindowFullscreen(platform_window, fullscreen);
-				notice("%s", fullscreen ? "fullscreen" : "window");
+				platform_window_set_fullscreen(!platform_window_fullscreen());
 			}
 #endif
 			break;
-		}
+			}
 		case SDL_EVENT_MOUSE_MOTION:
 #ifndef HALO_ANDROID
+#ifndef HALO_GLES
+			/* (not the warps: to the middle as a menu opens, and back to
+			where the mouse is held without relative mode) */
+			if (input_state.ui_pointer ? event.motion.x != ui_pointer.x || event.motion.y != ui_pointer.y :
+				!mouse_warp_capture || (int)event.motion.x != mouse_warp_x || (int)event.motion.y != mouse_warp_y)
+				menu_cursor_mouse_used(input_state.ui_pointer);
+#endif
 			if (scoreboard_pointer_active)
 			{
 				scoreboard_pointer.x = event.motion.x;
@@ -1483,12 +2170,24 @@ void platform_pump_events(void)
 				ui_pointer.moved = TRUE;
 				break;
 			}
+#ifndef HALO_WEB
+			if (mouse_warp_capture)
+			{
+				if ((int)event.motion.x == mouse_warp_x && (int)event.motion.y == mouse_warp_y)
+					break;
+				mouse_needs_warp = TRUE;
+			}
+#endif
 #endif
 			input_state.mouse_dx += event.motion.xrel;
 			input_state.mouse_dy += event.motion.yrel;
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
 		case SDL_EVENT_MOUSE_BUTTON_UP:
+#if !defined(HALO_ANDROID) && !defined(HALO_GLES)
+			if (event.button.down)
+				menu_cursor_mouse_used(input_state.ui_pointer);
+#endif
 			if (event.button.button < 32)
 			{
 				if (event.button.down)
@@ -1604,6 +2303,17 @@ void platform_pump_events(void)
 			/* (the scoreboard's pointer goes; the mouse is taken back for
 			the aim as the window has the focus again) */
 			scoreboard_pointer_active = FALSE;
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
+			if (mouse_warp_capture)
+			{
+				mouse_warp_capture = FALSE;
+				SDL_SetWindowMouseGrab(platform_window, false);
+				SDL_ShowCursor();
+			}
+#endif
+#ifdef HALO_ANDROID
+			touch_input_cancel();
+#endif
 			break;
 		case SDL_EVENT_WINDOW_FOCUS_GAINED:
 			input_state.focused = TRUE;
@@ -1613,13 +2323,80 @@ void platform_pump_events(void)
 				platform_mouse_capture(TRUE);
 #endif
 			break;
+#ifdef HALO_ANDROID
+		case SDL_EVENT_FINGER_DOWN:
+		case SDL_EVENT_FINGER_MOTION:
+		case SDL_EVENT_FINGER_UP:
+		case SDL_EVENT_FINGER_CANCELED:
+			touch_input_event(event.type, &event.tfinger);
+			break;
+#endif
 		case SDL_EVENT_GAMEPAD_ADDED:
+#ifdef HALO_ARM64_GUEST
+			/* (the guest reaches SDL only through host_imports.list, which
+			has no SDL_GetGamepadName) */
 			SDL_OpenGamepad(event.gdevice.which);
+#else
+			{
+				SDL_Gamepad *gamepad = SDL_OpenGamepad(event.gdevice.which);
+
+				/* (which pads the game drives: under Steam Input, Steam's
+				virtual ones, named for the controllers behind them; its
+				kind, and the device SDL reads it through: on Linux, a
+				hidraw node is SDL's own driver of the pad, an event node
+				the kernel's) */
+				if (gamepad)
+				{
+					const char *name = SDL_GetGamepadName(gamepad);
+					const char *type = SDL_GetGamepadStringForType(SDL_GetGamepadType(gamepad));
+					const char *path = SDL_GetGamepadPath(gamepad);
+
+					platform_log("gamepad: %s (%s%s%s)", name ? name : "(unnamed)", type ? type : "unknown",
+						path ? ", " : "", path ? path : "");
+				}
+			}
+#endif
+			break;
+#if !defined(HALO_ANDROID) && !defined(HALO_GLES)
+		case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+			menu_cursor_controller_used(input_state.ui_pointer);
+			break;
+		case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+			/* (past a stick's or trigger's rest, as gamepad_idle in
+			xinput_sdl.c has it) */
+			if (event.gaxis.value > 8000 || event.gaxis.value < -8000)
+				menu_cursor_controller_used(input_state.ui_pointer);
+			break;
+#endif
+		case SDL_EVENT_GAMEPAD_REMOVED:
+			/* (SDL keeps a gamepad open until it is closed, even once the
+			controller has gone) */
+			{
+				SDL_Gamepad *gamepad = SDL_GetGamepadFromID(event.gdevice.which);
+
+				if (gamepad)
+					SDL_CloseGamepad(gamepad);
+			}
 			break;
 		default:
 			break;
 		}
 	}
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
+	if (mouse_warp_capture && mouse_needs_warp && !input_state.ui_pointer &&
+		!scoreboard_pointer_active && !input_state.mouse_released)
+	{
+		int width = 0, height = 0;
+
+		SDL_GetWindowSize(platform_window, &width, &height);
+		if (width > 0 && height > 0)
+		{
+			mouse_warp_x = width / 2;
+			mouse_warp_y = height / 2;
+			SDL_WarpMouseInWindow(platform_window, (float)mouse_warp_x, (float)mouse_warp_y);
+		}
+	}
+#endif
 	pthread_mutex_unlock(&input_lock);
 	looked_at_clipboard = TRUE;
 	platform_invite_clipboard(look_at_clipboard);
@@ -1678,6 +2455,10 @@ void platform_ui_pointer_set_active(BOOL active)
 	memset(mouse_buttons_pressed, 0, sizeof(mouse_buttons_pressed));
 	pthread_mutex_unlock(&input_lock);
 	platform_mouse_capture(!active && !input_state.mouse_released);
+#ifndef HALO_GLES
+	if (active && menu_cursor_controller)
+		SDL_HideCursor();
+#endif
 	if (active)
 	{
 		int width, height;
@@ -1710,6 +2491,117 @@ BOOL platform_ui_pointer_read(struct platform_ui_pointer *pointer)
 void platform_video_window_size(int *width, int *height)
 {
 	SDL_GetWindowSize(platform_window, width, height);
+}
+
+/* ---------- the system's on-screen keyboard */
+
+/* A menu's text field is typed into (platform_text_field, xinput_sdl.c).
+Where Steam's on-screen keyboard is there to bring up (in Big Picture and in
+the Steam Deck's Game Mode, which ask for it with
+SDL_ENABLE_STEAM_SCREEN_KEYBOARD), SDL's text input runs while the field is
+typed into: the keyboard comes up with the field and goes with it, and what
+it types arrives as keys. Elsewhere text input stays off, as before, so that
+no input method takes the keys the field reads: a Wayland touch screen's
+keyboard (text-input-v3) would type text events, which the field does not
+read. */
+static SDL_AtomicInt screen_keyboard_wanted;
+/* (each field begun, which brings the keyboard up again: Steam does not say
+when its keyboard goes, by its own Enter or closed by hand, so SDL holds it
+to be up still; after a field ended and another begun in the same frame, as
+the password screen's is after a wrong password, it would not come back) */
+static SDL_AtomicInt screen_keyboard_requests;
+
+void platform_screen_keyboard(BOOL show, BOOL password)
+{
+	SDL_SetAtomicInt(&screen_keyboard_wanted, !show ? 0 : password ? 2 : 1);
+	if (show)
+		SDL_AddAtomicInt(&screen_keyboard_requests, 1);
+}
+
+/* (on the window's thread, as SDL asks: platform_pump_events) */
+static void screen_keyboard_update(void)
+{
+	/* (a keyboard shown again is closed first, as SDL opens none that it
+	holds to be up, and opened a moment later: Steam takes each as a URL,
+	steam://close/keyboard then steam://open/keyboard, which must not
+	arrive the other way round) */
+	enum { REOPEN_DELAY_MS = 500 };
+	static int requests_handled;
+	static Uint64 open_time;
+	int requests = SDL_GetAtomicInt(&screen_keyboard_requests);
+	int wanted = SDL_GetAtomicInt(&screen_keyboard_wanted);
+
+	if (!wanted)
+	{
+		open_time = 0;
+		if (SDL_TextInputActive(platform_window))
+			SDL_StopTextInput(platform_window);
+		return;
+	}
+	if (requests != requests_handled)
+	{
+		requests_handled = requests;
+		if (!SDL_HasScreenKeyboardSupport() ||
+			!SDL_GetHintBoolean(SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD, false))
+		{
+			return;
+		}
+		open_time = SDL_GetTicks();
+		if (SDL_TextInputActive(platform_window))
+		{
+			SDL_StopTextInput(platform_window);
+			open_time += REOPEN_DELAY_MS;
+		}
+	}
+	if (open_time && SDL_GetTicks() >= open_time)
+	{
+		/* one line: the keyboard's Enter ends the field (and Steam's
+		keyboard goes with it); a password's, for the keyboards that hide
+		what is typed into one */
+		SDL_PropertiesID properties = SDL_CreateProperties();
+
+		open_time = 0;
+		platform_log("text field: showing the on-screen keyboard");
+		SDL_SetBooleanProperty(properties, SDL_PROP_TEXTINPUT_MULTILINE_BOOLEAN, false);
+		SDL_SetNumberProperty(properties, SDL_PROP_TEXTINPUT_TYPE_NUMBER,
+			wanted == 2 ? SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN : SDL_TEXTINPUT_TYPE_TEXT);
+		SDL_StartTextInputWithProperties(platform_window, properties);
+		SDL_DestroyProperties(properties);
+	}
+}
+
+#else
+/* ---------- the menus' pointer (the touchscreen)
+
+While a menu is up, taps and drags go to the menus (touch_input.c,
+halo_ui_pointer_update in d3d8_gl.c). */
+void platform_ui_pointer_set_active(BOOL active)
+{
+	pthread_mutex_lock(&input_lock);
+	if ((active != FALSE) != (input_state.ui_pointer != FALSE))
+	{
+		input_state.ui_pointer = active;
+		touch_input_menu_set_active(active != FALSE);
+	}
+	pthread_mutex_unlock(&input_lock);
+}
+
+BOOL platform_ui_pointer_read(struct platform_ui_pointer *pointer)
+{
+	BOOL active;
+
+	pthread_mutex_lock(&input_lock);
+	active = input_state.ui_pointer;
+	touch_input_menu_read(pointer);
+	pthread_mutex_unlock(&input_lock);
+	return active;
+}
+
+/* the window is its pixels on Android (no display scaling): touch_input.c
+scales the fingers' 0..1 by the drawable's size */
+void platform_video_window_size(int *width, int *height)
+{
+	platform_video_drawable_size(width, height);
 }
 
 #endif

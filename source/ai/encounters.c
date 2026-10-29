@@ -2190,7 +2190,7 @@ void encounter_create(
 			struct squad_definition *squad_definition = TAG_BLOCK_GET_ELEMENT(
 				&encounter_definition->squads, squad_index, struct squad_definition);
 			short initial_variant;
-			short count;
+			short count = 0;
 			short actor_type;
 			short i;
 
@@ -2214,10 +2214,6 @@ void encounter_create(
 			case _game_difficulty_level_impossible:
 				count = squad_definition->max_count;
 				break;
-			/* count is left unassigned only by this default arm. Not reached unassigned: the
-			 * arm's assertion failure calls system_exit, which does not return in January
-			 * (0x47c960 jumps to halt_and_catch_fire 0x4f21c0, which loops or calls exit).
-			 * Source-policy approval pending (2026-09-27 audit). */
 			default:
 				match_vassert("c:\\halo\\SOURCE\\ai\\encounters.c", 1730, FALSE, NULL);
 			}
@@ -2279,7 +2275,8 @@ void encounter_create(
 			/* port: network co-op's extra enemies, for its players
 			(coop_enemies.c) */
 			{
-				short extra_count = coop_enemies_extra_count(encounter_index, count);
+				/* port: the Monitor is a scripted character, even on a hostile team. */
+				short extra_count = actor_type == _actor_monitor ? 0 : coop_enemies_extra_count(encounter_index, count);
 
 				for (i = 0; i < extra_count; ++i)
 					encounter_place_actor(encounter_index, squad_index, 0, FALSE, (short)(i + 1));
@@ -3231,6 +3228,18 @@ static boolean encounter_place_actor(
 						upgrade_major = ai_consider_major_upgrade(encounter_index, squad_index, chance);
 				}
 
+				/* port: a starting location or major upgrade can replace the squad's
+				actor type. Never create an extra Monitor through either route. */
+				if (extra_number > 0)
+				{
+					struct actor_variant_definition *placed_variant = actor_variant_definition;
+
+					if (upgrade_major)
+						placed_variant = actor_variant_definition_get(actor_variant_definition->major_upgrade_reference.index);
+					if (placed_variant->actor_reference.index != NONE &&
+						actor_definition_get(placed_variant->actor_reference.index)->type == _actor_monitor)
+						return FALSE;
+				}
 				placed = actor_place(actor_palette_entry->index, encounter_index, squad_index, starting_location, upgrade_major, initial_variant) != NONE;
 			}
 		}

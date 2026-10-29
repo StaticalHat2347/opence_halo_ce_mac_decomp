@@ -88,7 +88,9 @@ struct text_hires_glyph
 	float advance;
 };
 
-long text_hires_font(char const *tag_name, float cap_height, float oversample);
+#define TEXT_HIRES_FIT_LETTERS 52
+int text_hires_enabled(void); /* port: port/linux/src/text_hires.c */
+long text_hires_font(char const *tag_name, float cap_height, short const *letter_widths, float oversample);
 int text_hires_covers(long font, unsigned long code);
 int text_hires_glyph(long font, unsigned long code, struct text_hires_glyph *glyph);
 void text_hires_register_atlas(unsigned long const *texture, unsigned long width, unsigned long height);
@@ -176,6 +178,8 @@ static void hardware_character_cache_get_origin(
 	short hardware_character_index,
 	short *x0,
 	short *y0);
+static short hardware_character_padding(
+	struct font_character const *font_character);
 static void flush_hardware_character(
 	struct hardware_character *hardware_character);
 static void cache_hardware_format_character(
@@ -237,6 +241,15 @@ static void rasterizer_draw_hires_character_with_dropshadow(
 static struct hardware_character_cache hardware_character_cache;
 static struct bitmap_data *hires_text_atlas = NULL;
 static long hires_text_font = NONE;
+/* port: the high-res text's fonts of the font tags of the map (forgotten
+when its tags are, by rasterizer_text_cache_flush) */
+static struct
+{
+	struct font_header *font;
+	real oversample;
+	long hires_font;
+} hires_text_fonts[MAXIMUM_HIRES_TEXT_FONTS];
+static short hires_text_next_font = 0;
 /* port: the text's scale about a point (rasterizer_text_set_scale) */
 static real text_scale = 1.0f;
 static real text_scale_origin_x = 0.0f;
@@ -317,7 +330,6 @@ rasterizer_text_cache_initialize(
 	return success;
 }
 
-
 void
 rasterizer_text_set_shadow_color(
 	pixel32 shadow_color)
@@ -346,6 +358,9 @@ rasterizer_text_cache_flush(
 			hardware_character++;
 		} while (--hardware_character_count);
 	}
+	/* port: the next map's font tags may be at the same addresses */
+	memset(hires_text_fonts, 0, sizeof(hires_text_fonts));
+	hires_text_next_font = 0;
 
 	return;
 }
@@ -383,6 +398,10 @@ rasterizer_draw_character(
 	short dx,
 	short dy)
 {
+	/* port: the string's characters so far drawn before a character is
+	cached, which can give another's place in the cache to it */
+	if (font_character->hardware_character_index == NONE)
+		rasterizer_text_flush();
 	cache_hardware_format_character(font, font_character);
 
 	if (font_character->hardware_character_index != NONE)
@@ -688,6 +707,10 @@ rasterizer_draw_character_with_dropshadow(
 	short dx,
 	short dy)
 {
+	/* port: the string's characters so far drawn before a character is
+	cached, which can give another's place in the cache to it */
+	if (font_character->hardware_character_index == NONE)
+		rasterizer_text_flush();
 	cache_hardware_format_character(font, font_character);
 
 	if (font_character->hardware_character_index != NONE)
@@ -784,34 +807,39 @@ static void rasterizer_text_draw_scaled_character(
 }
 
 /* port: the high-res text's font for a font tag, sized by the height of its
-capital H (its rows with ink), its glyphs drawn with oversample times the
-pixels (for text scaled up), or NONE */
+capital H (its rows with ink) and fitted to the widths of its letters, its
+glyphs drawn with oversample times the pixels (for text scaled up), or NONE */
 static long hires_text_font_get(
 	long font_index,
 	real oversample)
 {
-	static struct
-	{
-		struct font_header *font;
-		real oversample;
-		long hires_font;
-	} fonts[MAXIMUM_HIRES_TEXT_FONTS];
-	static short next_font = 0;
 	struct font_header *font;
 	struct font_character *capital;
+	short letter_widths[TEXT_HIRES_FIT_LETTERS];
 	short font_slot;
+	short letter;
 	short top = NONE;
 	short bottom = NONE;
 	short row;
 	long hires_font;
 
-	if (font_index == NONE)
+	/* port: consult the committed setting before the font cache. In particular,
+	 * never cache NONE merely because high-res text was disabled. */
+	if (font_index == NONE || !text_hires_enabled())
 		return NONE;
 	font = font_definition_get(font_index);
 	for (font_slot = 0; font_slot < MAXIMUM_HIRES_TEXT_FONTS; font_slot++)
 	{
-		if (fonts[font_slot].font == font && fonts[font_slot].oversample == oversample)
-			return fonts[font_slot].hires_font;
+		if (hires_text_fonts[font_slot].font == font && hires_text_fonts[font_slot].oversample == oversample)
+			return hires_text_fonts[font_slot].hires_font;
+	}
+	/* (A to Z, then a to z; none where the tag has not the letter) */
+	for (letter = 0; letter < TEXT_HIRES_FIT_LETTERS; letter++)
+	{
+		struct font_character *character = font_get_character_by_ascii_code(font,
+			(word)(letter < 26 ? 'A' + letter : 'a' + letter - 26));
+
+		letter_widths[letter] = character ? character->character_width : 0;
 	}
 	capital = font_get_character_by_ascii_code(font, 'H');
 	if (capital)
@@ -835,13 +863,13 @@ static long hires_text_font_get(
 		}
 	}
 	hires_font = top == NONE ? NONE :
-		text_hires_font(tag_get_name(font_index), (float)(bottom - top + 1), (float)oversample);
+		text_hires_font(tag_get_name(font_index), (float)(bottom - top + 1), letter_widths, (float)oversample);
 	if (hires_font < 0)
 		hires_font = NONE;
-	fonts[next_font].font = font;
-	fonts[next_font].oversample = oversample;
-	fonts[next_font].hires_font = hires_font;
-	next_font = (short)((next_font + 1) % MAXIMUM_HIRES_TEXT_FONTS);
+	hires_text_fonts[hires_text_next_font].font = font;
+	hires_text_fonts[hires_text_next_font].oversample = oversample;
+	hires_text_fonts[hires_text_next_font].hires_font = hires_font;
+	hires_text_next_font = (short)((hires_text_next_font + 1) % MAXIMUM_HIRES_TEXT_FONTS);
 
 	return hires_font;
 }
@@ -1043,10 +1071,25 @@ hardware_character_cache_get_origin(
 	match_assert("c:\\halo\\SOURCE\\rasterizer\\rasterizer_text.c", 598, hardware_character_index>=0 && hardware_character_index<MAXIMUM_HARDWARE_CHARACTERS);
 	match_assert("c:\\halo\\SOURCE\\rasterizer\\rasterizer_text.c", 599, x0 && y0);
 
-	*x0 = hardware_character->x0;
-	*y0 = hardware_character->y0;
+	*x0 = hardware_character->x0 + hardware_character_padding(hardware_character->character);
+	*y0 = hardware_character->y0 + hardware_character_padding(hardware_character->character);
 
 	return;
+}
+
+/* port: the clear texels around a character in the cache (its cell is that
+much larger each side). The cache packs characters edge to edge, which the
+Xbox's 640x480 sampled texel for pixel; drawn larger (a fullscreen
+display's resolution), each edge pixel blends in half a texel past the
+character, from the next character or one the cache dropped, and the text
+and its drop shadow showed the cells' borders. A character too large for
+the border goes without. */
+static short hardware_character_padding(
+	struct font_character const *font_character)
+{
+	return font_character &&
+		font_character->bitmap_width + 2 <= HARDWARE_CHARACTER_CACHE_BITMAP_WIDTH &&
+		font_character->bitmap_height + 2 <= HARDWARE_CHARACTER_CACHE_BITMAP_HEIGHT ? 1 : 0;
 }
 
 static void
@@ -1087,20 +1130,23 @@ cache_hardware_format_character(
 		short y0, y1;
 		short x, y;
 		short next_write_index;
+		short padding = hardware_character_padding(font_character);
+		short cell_width = font_character->bitmap_width + 2 * padding;
+		short cell_height = font_character->bitmap_height + 2 * padding;
 
 		match_assert("c:\\halo\\SOURCE\\rasterizer\\rasterizer_text.c", 645, font_character->bitmap_width<=HARDWARE_CHARACTER_CACHE_BITMAP_WIDTH);
 		match_assert("c:\\halo\\SOURCE\\rasterizer\\rasterizer_text.c", 646, font_character->bitmap_height<=HARDWARE_CHARACTER_CACHE_BITMAP_HEIGHT);
 
 		font_character->pad = magic_number;
 
-		if (font_character->bitmap_width + hardware_character_cache.x0 > HARDWARE_CHARACTER_CACHE_BITMAP_WIDTH)
+		if (cell_width + hardware_character_cache.x0 > HARDWARE_CHARACTER_CACHE_BITMAP_WIDTH)
 		{
 			hardware_character_cache.x0 = 0;
 			hardware_character_cache.y0 += hardware_character_cache.maximum_character_height;
 			hardware_character_cache.maximum_character_height = 0;
 		}
 
-		if (font_character->bitmap_height + hardware_character_cache.y0 > HARDWARE_CHARACTER_CACHE_BITMAP_HEIGHT)
+		if (cell_height + hardware_character_cache.y0 > HARDWARE_CHARACTER_CACHE_BITMAP_HEIGHT)
 		{
 			hardware_character_cache.y0 = 0;
 			hardware_character_cache.x0 = 0;
@@ -1119,10 +1165,10 @@ cache_hardware_format_character(
 			}
 		}
 
-		if (font_character->bitmap_height > hardware_character_cache.maximum_character_height)
+		if (cell_height > hardware_character_cache.maximum_character_height)
 		{
 			y0 = hardware_character_cache.y0 + hardware_character_cache.maximum_character_height;
-			y1 = hardware_character_cache.y0 + font_character->bitmap_height;
+			y1 = hardware_character_cache.y0 + cell_height;
 
 			for (;
 				hardware_character_cache.read_index != hardware_character_cache.write_index;
@@ -1136,7 +1182,7 @@ cache_hardware_format_character(
 				flush_hardware_character(hardware_character);
 			}
 
-			hardware_character_cache.maximum_character_height = font_character->bitmap_height;
+			hardware_character_cache.maximum_character_height = cell_height;
 		}
 
 		next_write_index = (hardware_character_cache.write_index + 1) & (MAXIMUM_HARDWARE_CHARACTERS - 1);
@@ -1155,7 +1201,9 @@ cache_hardware_format_character(
 
 		source = (byte *)font->pixels.address + font_character->pixels_offset;
 
-		for (y = 0; y < font_character->bitmap_height; y++)
+		/* (port: the border clear, white with no alpha as the character's
+		own clear texels are) */
+		for (y = 0; y < cell_height; y++)
 		{
 			word *destination = (word *)bitmap_2d_address(
 				hardware_character_cache.bitmap,
@@ -1163,13 +1211,23 @@ cache_hardware_format_character(
 				(short)(hardware_character->y0 + y),
 				0);
 
-			for (x = 0; x < font_character->bitmap_width; x++)
-				*destination++ = (word)((*source++ << 8) | 0x0FFF);
+			for (x = 0; x < cell_width; x++)
+			{
+				if (y < padding || y >= padding + font_character->bitmap_height ||
+					x < padding || x >= padding + font_character->bitmap_width)
+				{
+					*destination++ = 0x0FFF;
+				}
+				else
+				{
+					*destination++ = (word)((*source++ << 8) | 0x0FFF);
+				}
+			}
 		}
 
 		rasterizer_bitmap_changed(hardware_character_cache.bitmap);
 
-		hardware_character_cache.x0 += font_character->bitmap_width;
+		hardware_character_cache.x0 += cell_width;
 		hardware_character_cache.write_index = (hardware_character_cache.write_index + 1) & (MAXIMUM_HARDWARE_CHARACTERS - 1);
 	}
 

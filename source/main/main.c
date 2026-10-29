@@ -381,6 +381,17 @@ symbols in this file:
 #include "networking/network_server_manager.h" /* port: a co-op game's level won */
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
 #include "network_voice.h" /* port: port/linux/game/network_voice.c */
+#include "network_chat.h" /* port: port/linux/game/network_chat.c */
+#include "network_aim_assist.h" /* port: port/linux/game/network_aim_assist.c */
+#include "network_shield_effects.h" /* port: port/linux/game/network_shield_effects.c */
+#include "map_share.h" /* port: port/linux/game/map_share.c */
+#include "profile_sections.h" /* port: port/linux/include/profile_sections.h */
+#ifdef HALO_PROFILE
+#include "profile_trace.h" /* port: port/linux/src/profile_trace.c */
+#endif
+#ifdef HALO_WEB
+#include <emscripten.h> /* port: the browser runs the main loop (port/web/README.md) */
+#endif
 #include "camera/director.h"
 #include "camera/observer.h"
 #include "cutscene/cinematics.h"
@@ -393,6 +404,7 @@ symbols in this file:
 #include "text/font_group.h"
 #include "tag_files/files.h"
 #include "custom_edition_cache.h" /* port: custom_edition_level_name */
+#include "view_fov.h" /* port: display.fov, before the projection and culling */
 
 #if defined(HALO_WINDOWS) || defined(HALO_ANDROID) || defined(HALO_MACOS) || defined(__linux__)
 #define HALO_NATIVE_BUILD_INFO 1
@@ -671,6 +683,7 @@ typedef char screenshot_and_framerate_globals_size_assert[
 	sizeof(struct _screenshot_and_framerate_globals) == 0x38B ? 1 : -1];
 
 void network_test_update(boolean main_menu_loaded, real seconds);
+#include "server_director.h" /* port: port/linux/game/server_director.c */
 
 /* ---------- prototypes */
 
@@ -718,6 +731,8 @@ static struct _main_globals main_globals = { 0 };
 /* Keep the original globals layout; these clocks belong to pending requests. */
 static long main_loss_last_tick;
 static long main_respawn_last_tick;
+/* port: the game tick a checkpoint last counted (main_save_map_private) */
+static long main_save_last_tick;
 boolean debug_force_frame_rate_update = FALSE;
 boolean debug_no_drawing = FALSE;
 boolean debug_game_save = FALSE;
@@ -1151,11 +1166,12 @@ void set_window_camera_values(
 		window->rasterizer_camera.position = observer->position;
 		window->rasterizer_camera.forward = observer->forward;
 		window->rasterizer_camera.up = observer->up;
+		/* port: display.fov's view, the local render view only (view_fov.c) */
 		window->rasterizer_camera.vertical_field_of_view =
-			2.0f * arctangent(
+			render_fov_vertical(window->local_player_index, 2.0f * arctangent(
 				0.75f * render_camera_get_adjusted_field_of_view_tangent(
 					observer->field_of_view),
-				1.0f);
+				1.0f));
 
 		if (window->local_player_index != NONE &&
 			!console_is_active() &&
@@ -1441,6 +1457,16 @@ short main_get_window_count(
 	return single_window ? 1 : PIN(local_player_count(), 1, MAXIMUM_WINDOWS);
 }
 
+#ifdef HALO_PROFILE
+/* port: whether the main menu's map is the one loaded (profile_console.c: a
+recording of debug.profile_record_when = "game" waits for another) */
+boolean main_menu_is_loaded(
+	void)
+{
+	return main_globals.main_menu_scenario_loaded;
+}
+#endif
+
 static void main_new_map(
 	struct game_options *options)
 {
@@ -1597,6 +1623,8 @@ void main_save_map_safe(
 		main_globals.ticks_until_next_save_check = 0;
 		main_globals.ticks_unable_to_save = 0;
 		main_globals.safe_intervals = 0;
+		/* port: the tick before: the first check is at once */
+		main_save_last_tick = game_time_get()-1;
 	}
 	return;
 }
@@ -1611,6 +1639,8 @@ void main_save_map_no_timeout(
 		main_globals.ticks_until_next_save_check = 0;
 		main_globals.ticks_unable_to_save = 0;
 		main_globals.safe_intervals = 0;
+		/* port: the tick before: the first check is at once */
+		main_save_last_tick = game_time_get()-1;
 	}
 	main_globals.save_map_timeout = FALSE;
 	return;
@@ -2068,26 +2098,40 @@ static void main_save_map_private(
 
 		if (save_map_safely)
 		{
-			if (main_globals.ticks_unable_to_save++ >= 240 &&
-				main_globals.save_map_timeout)
+			/* port: the counts below are of game ticks, as on the Xbox, whose
+			loop ran once a tick (30 a second). This loop runs once a frame, and
+			at 60 frames a second or more a checkpoint gave up in a few seconds,
+			before the fight it waited on was over: few checkpoints came */
+			long current_tick = game_time_get();
+			long ticks = current_tick-main_save_last_tick;
+
+			if (current_tick < main_save_last_tick)
+				ticks = 0;
+			main_save_last_tick = current_tick;
+
+			while (ticks-- > 0 && !save_map)
 			{
-				if (debug_game_save)
-					console_printf(FALSE, "gave up trying to save");
-				main_globals.saving_map = FALSE;
-				return;
-			}
-			else if (main_globals.ticks_until_next_save_check-- <= 0)
-			{
-				if (game_safe_to_save())
+				if (main_globals.ticks_unable_to_save++ >= 240 &&
+					main_globals.save_map_timeout)
 				{
-					if (main_globals.safe_intervals++ >= 3)
-						save_map = TRUE;
+					if (debug_game_save)
+						console_printf(FALSE, "gave up trying to save");
+					main_globals.saving_map = FALSE;
+					return;
 				}
-				else
+				else if (main_globals.ticks_until_next_save_check-- <= 0)
 				{
-					main_globals.safe_intervals = 0;
+					if (game_safe_to_save())
+					{
+						if (main_globals.safe_intervals++ >= 3)
+							save_map = TRUE;
+					}
+					else
+					{
+						main_globals.safe_intervals = 0;
+					}
+					main_globals.ticks_until_next_save_check = 10;
 				}
-				main_globals.ticks_until_next_save_check = 10;
 			}
 		}
 		else
@@ -2282,8 +2326,11 @@ static void main_frame_rate_debug(
 			FILE *file;
 
 			GetSystemTime(&system_time);
-			sprintf(
+			/* port: snprintf, here and below (a map's tag's name may be any
+			length) */
+			snprintf(
 				core_name,
+				sizeof(core_name),
 				"%s_slow_%d_%d_%d_%d_%d_%d.bin",
 				scenario_name,
 				system_time.wMonth,
@@ -2293,7 +2340,7 @@ static void main_frame_rate_debug(
 				system_time.wMinute,
 				system_time.wSecond);
 			game_state_save_core(core_name);
-			sprintf(init_file_name, "d:\\%s_init.txt", scenario_name);
+			snprintf(init_file_name, sizeof(init_file_name), "d:\\%s_init.txt", scenario_name);
 
 			file = fopen(init_file_name, "r");
 			if (!file)
@@ -2367,6 +2414,10 @@ void main_set_map_name(
 static void main_exit(
 	void)
 {
+#ifdef HALO_PROFILE
+	/* port: the profiling build's recording written out before the game goes */
+	profile_trace_shutdown();
+#endif
 	switch (main_globals.connection)
 	{
 	case _game_connection_network_server:
@@ -2424,6 +2475,13 @@ static void main_update_time_unthrottled(
 	if (main_globals.movie)
 	{
 		seconds_elapsed = main_globals.recording_dt;
+	}
+	else if (halo_fixed_step() && main_globals.connection == _game_connection_local)
+	{
+		/* port: debug.fixed_step, a frame a tick whatever time has passed, as
+		a movie's frames are its recording's: what runs once a frame (aiming)
+		sees the game's time, and the game plays the same every time */
+		seconds_elapsed = 1.0f / TICKS_PER_SECOND;
 	}
 	else
 	{
@@ -2667,6 +2725,11 @@ static void main_update_time(
 	{
 		seconds_elapsed = main_globals.recording_dt;
 	}
+	else if (halo_fixed_step() && main_globals.connection == _game_connection_local)
+	{
+		/* port: debug.fixed_step, as main_update_time_unthrottled */
+		seconds_elapsed = 1.0f / TICKS_PER_SECOND;
+	}
 	else
 	{
 		seconds_elapsed = PIN(seconds_elapsed, 0.0f, 1.0f);
@@ -2700,7 +2763,6 @@ void main_rasterizer_throttle(
 	unsigned long start_milliseconds;
 	short lapsed_frames;
 	boolean did_throttle;
-	boolean precache_in_progress;
 	boolean synchronized;
 	char const *description;
 
@@ -2715,15 +2777,17 @@ void main_rasterizer_throttle(
 		if ((__int64)rasterizer_globals.frame_and_vertical_blank_index < target_index)
 		{
 			start_milliseconds = system_milliseconds();
-			precache_in_progress = cache_files_precache_in_progress();
 			did_throttle = TRUE;
 			profile_idle_start();
 			while ((__int64)rasterizer_globals.frame_and_vertical_blank_index < target_index)
 			{
-				if (precache_in_progress)
-				{
-					Sleep(1);
-				}
+				/* port: a sleep between looks, not only while a map
+				precaches: the Xbox spun here, which on a port holds a core
+				busy for most of each frame of a game held at 30 frames a
+				second (display.interpolation off). A millisecond is well
+				inside a 33 ms frame (Windows sets its timer to 1 ms:
+				win32_posix.c) */
+				Sleep(1);
 				if (system_milliseconds() > start_milliseconds + 1000)
 				{
 					console_warning(
@@ -3077,6 +3141,17 @@ void halt_and_catch_fire(
 	char label[96];
 	#endif
 
+#ifdef HALO_WEB
+	/* port: a browser shows only what a frame of its own main loop drew, and
+	this screen never returns to it: the game stops, and the page shows the
+	error from the log, where it already is (port/web/README.md) */
+	emscripten_cancel_main_loop();
+	abort();
+#endif
+	/* port: a dedicated server has no screen to halt on: its error logged,
+	it ends with exit code 1 (port/linux/game/server_director.c) */
+	if (halo_server_mode())
+		server_fatal(error_get());
 	if (!global_screenshot_count.halt_recursion_lock)
 	{
 		scenario = global_scenario_try_and_get();
@@ -3200,6 +3275,9 @@ void halt_and_catch_fire(
 void main_loop_of_death(
 	void)
 {
+	/* port: as halt_and_catch_fire, on a dedicated server */
+	if (halo_server_mode())
+		server_fatal(error_get());
 	while (TRUE)
 	{
 		input_frame_begin();
@@ -3314,11 +3392,42 @@ static void main_game_render(
 	return;
 }
 
+/* port: the main loop's steps, timed in the profiling build */
+PROFILE_SECTION(main_input_section, "input")
+PROFILE_SECTION(main_platform_events_section, "platform_events")
+PROFILE_SECTION(main_network_start_frame_section, "network_start_frame")
+PROFILE_SECTION(main_update_time_section, "main_update_time")
+PROFILE_SECTION(main_ui_update_section, "ui_update")
+PROFILE_SECTION(main_network_end_frame_section, "network_end_frame")
+PROFILE_SECTION(main_game_time_update_section, "game_time_update")
+PROFILE_SECTION(main_non_deterministic_update_section, "non_deterministic_update")
+PROFILE_SECTION(main_throttle_section, "throttle")
+PROFILE_SECTION(main_present_section, "present")
+
+#ifdef HALO_WEB
+/* port: in a browser, the page's frames call the main loop one iteration at a
+time, and what an iteration drew shows once it returns (port/web/README.md) */
+static boolean main_loop_iteration(void);
+
+static void main_loop_web_frame(
+	void)
+{
+	if (!main_loop_iteration())
+	{
+		emscripten_cancel_main_loop();
+		error(_error_silent, "end of saved film");
+		main_exit();
+	}
+}
+#endif
+
 void main_loop(
 	void)
 {
+#ifndef HALO_WEB
 	boolean render_frame;
 	long connection;
+#endif
 
 	if (!game_in_editor())
 	{
@@ -3337,7 +3446,20 @@ void main_loop(
 	main_setup_connection();
 	main_initialize_time();
 
+#ifdef HALO_WEB
+	emscripten_set_main_loop(main_loop_web_frame, 0, TRUE);
+}
+
+static boolean main_loop_iteration(
+	void)
+{
+	boolean render_frame;
+	long connection;
+
+	do
+#else
 	while (TRUE)
+#endif
 	{
 		if (!game_in_editor())
 		{
@@ -3427,12 +3549,16 @@ void main_loop(
 		}
 
 		profile_frame_start();
+		profile_scope_enter(main_input_section)
 		input_frame_begin();
 		input_update();
 		input_abstraction_update();
+		profile_scope_exit(main_input_section)
+		profile_scope_enter(main_platform_events_section)
 		shell_idle();
 		event_manager_update();
 		telnet_console_process();
+		profile_scope_exit(main_platform_events_section)
 
 		if (!shell_application_is_paused())
 		{
@@ -3440,8 +3566,20 @@ void main_loop(
 
 			/* automated system link tests (port/linux/game/network_test.c) */
 			network_test_update(main_globals.main_menu_scenario_loaded, main_globals.seconds_elapsed);
+			/* port: a dedicated server's hosting, rotation and commands
+			(port/linux/game/server_director.c) */
+			server_update(main_globals.main_menu_scenario_loaded, main_globals.seconds_elapsed);
 			/* port: voice chat, in the lobby and in game (port/linux/game/network_voice.c) */
 			network_voice_update();
+			/* port: apply and replicate the host's mouse aim-assist policy. */
+			network_aim_assist_update();
+			/* port: the host's shield effects, for every machine (port/linux/game/network_shield_effects.c) */
+			network_shield_effects_update();
+			/* port: map sharing, in the lobby and in game (port/linux/game/map_share.c) */
+			map_share_update();
+			/* port: network games' text chat (port/linux/game/network_chat.c) */
+			network_chat_update();
+			profile_scope_enter(main_network_start_frame_section)
 			connection = main_globals.connection;
 			if (connection==_game_connection_network_client)
 			{
@@ -3469,14 +3607,32 @@ void main_loop(
 			}
 			else if (connection==_game_connection_film_playback)
 			{
+				profile_scope_exit(main_network_start_frame_section)
 				break;
 			}
+			profile_scope_exit(main_network_start_frame_section)
 
-			main_update_time();
+			/* port: a dedicated server's frames paced by its clock, with no
+			display to wait for (port/linux/src/server_mode.c) */
+			if (halo_server_mode())
+			{
+				server_mode_pace_frame();
+				profile_scope(main_update_time_section, main_update_time_unthrottled();)
+			}
+			else
+			{
+				profile_scope(main_update_time_section, main_update_time();)
+			}
+			profile_scope_enter(main_ui_update_section)
 			process_ui_widgets();
 			bink_playback_update();
+			profile_scope_exit(main_ui_update_section)
 
-			if ((!game_in_editor() && (input_key_is_down(_key_end) || input_key_is_down(_key_escape))) || editor_should_exit())
+			/* port: not the Xbox debug keyboard's End and Escape, which stop
+			the movie and restart the map: this keyboard reaches the game only
+			through the console and the menus' text boxes, whose End and Escape
+			they are (port/linux/src/xinput_sdl.c) */
+			if (editor_should_exit())
 			{
 				main_movie_stop();
 
@@ -3492,18 +3648,23 @@ void main_loop(
 
 				if (!console_update() || main_globals.connection!=_game_connection_local)
 				{
-					debug_keys_update();
+					/* port: not while a chat line is typed (its K plays an animation) */
+					if (!network_chat_typing())
+						debug_keys_update();
 					cheats_update();
 					player_control_update((real)main_globals.halt_time_scale*main_globals.seconds_elapsed);
 
 					connection = main_globals.connection;
+					profile_scope_enter(main_network_end_frame_section)
 					if (connection>_game_connection_local && connection<=_game_connection_network_server && !network_game_client_end_frame())
 					{
 						display_error_when_main_menu_loaded(1);
 						network_game_abort();
 					}
+					profile_scope_exit(main_network_end_frame_section)
 
-					game_time_update((real)main_globals.halt_time_scale*main_globals.seconds_elapsed);
+					profile_scope(main_game_time_update_section,
+						game_time_update((real)main_globals.halt_time_scale*main_globals.seconds_elapsed);)
 
 					render_frame = main_globals.main_menu_scenario_loaded ||
 						(main_globals.halt_time_scale &&
@@ -3513,11 +3674,13 @@ void main_loop(
 						render_frame = main_globals.main_menu_scenario_loaded || main_globals.halt_time_scale;
 					render_frame &= !game_engine_running() || game_time_get()>=3;
 
+					profile_scope_enter(main_non_deterministic_update_section)
 					collision_log_continue_period(1);
 					director_update((real)main_globals.halt_time_scale*main_globals.seconds_elapsed);
 					observer_update((real)main_globals.halt_time_scale*main_globals.seconds_elapsed);
 					collision_log_end_period();
 					game_engine_update_non_deterministic((real)main_globals.halt_time_scale*main_globals.seconds_elapsed);
+					profile_scope_exit(main_non_deterministic_update_section)
 				}
 
 				if (main_globals.saving_map)
@@ -3534,18 +3697,20 @@ void main_loop(
 					profile_render_end();
 				}
 			}
-			else
+			/* port: nothing drawn on a dedicated server, nor waited for */
+			else if (!halo_server_mode())
 			{
 				profile_render_start();
 				main_pregame_render();
 				profile_render_end();
 			}
 
-			main_rasterizer_throttle();
+			if (!halo_server_mode())
+				profile_scope(main_throttle_section, main_rasterizer_throttle();)
 
 			if (render_frame && !debug_no_drawing)
 			{
-				main_present_frame();
+				profile_scope(main_present_section, main_present_frame();)
 			}
 		}
 
@@ -3559,12 +3724,59 @@ void main_loop(
 			main_reset_time();
 			main_globals.halt_time_scale = TRUE;
 		}
+#ifdef HALO_WEB
+		return TRUE;
+#endif
 	}
+#ifdef HALO_WEB
+	while (FALSE);
+	/* (a film played to its end) */
+	return FALSE;
+#else
 
 	error(_error_silent, "end of saved film");
 	main_exit();
 
 	return;
+#endif
 }
 
 /* ---------- private code */
+
+/* port: what this build is, which a client tells the hosts it joins
+(network_distributed.c's _distributed_message_client_build): its number (0
+for a build CI did not number), configuration, the GitHub repository it is
+made from (owner/name; empty if not known) and the label it shows */
+#ifndef HALO_BUILD_NUMBER
+#define HALO_BUILD_NUMBER 0
+#endif
+#ifndef HALO_BUILD_FLAVOR
+#define HALO_BUILD_FLAVOR "local"
+#endif
+#ifndef HALO_BUILD_REPOSITORY
+#define HALO_BUILD_REPOSITORY ""
+#endif
+void main_build_identity(
+	long *number,
+	char *flavor,
+	size_t flavor_size,
+	char *repository,
+	size_t repository_size,
+	char *version,
+	size_t version_size)
+{
+	*number = HALO_BUILD_NUMBER;
+	_snprintf(flavor, flavor_size - 1, "%s", HALO_BUILD_FLAVOR);
+	flavor[flavor_size - 1] = 0;
+	_snprintf(repository, repository_size - 1, "%s", HALO_BUILD_REPOSITORY);
+	repository[repository_size - 1] = 0;
+#ifdef HALO_NATIVE_BUILD_INFO
+	main_native_build_label(version, version_size);
+#else
+	if (HALO_BUILD_NUMBER > 0)
+		_snprintf(version, version_size - 1, "OpenCE Web | build %d (%s)", HALO_BUILD_NUMBER, HALO_BUILD_FLAVOR);
+	else
+		_snprintf(version, version_size - 1, "OpenCE Web | local build (%s)", HALO_BUILD_FLAVOR);
+	version[version_size - 1] = 0;
+#endif
+}

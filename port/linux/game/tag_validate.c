@@ -20,7 +20,9 @@ walked once through its group's schema:
 - counts are cut to what the game has room for, indices, enums and tags
   past what they name are corrected, runtime values reset (tag_schema.h);
 - then, once every tag has been through it, the checks that look at other
-  tags or at graphs (a bsp's nodes, a model's) run.
+  tags or at graphs (a bsp's nodes, a model's) run, and a tag's name that
+  lies in any tag's bytes, where what is written could end it elsewhere,
+  is none.
 A map is refused if any pointer is wrong; anything else is corrected and
 logged, and the map plays.
 
@@ -61,6 +63,11 @@ enum
 
 	/* how deep blocks go in a schema (the deepest are 6 or 7) */
 	MAXIMUM_VALIDATION_DEPTH = 32,
+	/* the longest a tag's name is, with its terminator (Halo's tools' paths:
+	the game's buffers for them, game_state.c's, objects.c's, are this
+	size) */
+	MAXIMUM_TAG_NAME_LENGTH = 256,
+
 	/* how many corrections are logged one by one, for each map or bsp */
 	MAXIMUM_LOGGED_CORRECTIONS = 64,
 	MAXIMUM_MESSAGE_LENGTH = 512,
@@ -431,12 +438,18 @@ static boolean string_valid(
 	/* (the name a nameless tag or reference is given) */
 	if (string == tag_validate_empty_name)
 		return TRUE;
+	/* (and no longer than a tag's path is, MAXIMUM_TAG_NAME_LENGTH: the
+	game copies and formats names into buffers of that size) */
 	if (region_contains(validation, string, 1))
-		return memchr(string, 0, validation->region_size - offset) != NULL;
+	{
+		return memchr(string, 0, MIN(validation->region_size - offset, (unsigned long)MAXIMUM_TAG_NAME_LENGTH)) !=
+			NULL;
+	}
 	if (tags && (unsigned long)string >= (unsigned long)tags &&
 		tags_offset < (unsigned long)tag_validate_globals.tag_data_size)
 	{
-		return memchr(string, 0, tag_validate_globals.tag_data_size - tags_offset) != NULL;
+		return memchr(string, 0, MIN(tag_validate_globals.tag_data_size - tags_offset,
+			(unsigned long)MAXIMUM_TAG_NAME_LENGTH)) != NULL;
 	}
 
 	return FALSE;
@@ -737,6 +750,22 @@ static void validate_value(
 
 		if ((value >= 0 && value < field->maximum && value != none) || (none_allowed && value == none))
 			break;
+		/* (a Custom Edition map's tools left some shorts big-endian, as tag
+		files store them: Hornet's Nest's assault rifle muzzle flash light
+		has function types of 256 for 1. The value with its bytes swapped is
+		taken when that is one of the field's) */
+		if (tag_validate_globals.custom_edition && field->size == 2)
+		{
+			long swapped = ((value & 0xFF) << 8) | ((value >> 8) & 0xFF);
+
+			if (swapped < field->maximum)
+			{
+				tag_validate_correct(validation, "is %ld, past its %ld values: %ld, its bytes swapped",
+					value, field->maximum, swapped);
+				integer_set(address, field->size, swapped);
+				break;
+			}
+		}
 		tag_validate_correct(validation, "is %ld, past its %ld values: %s",
 			value, field->maximum, none_allowed ? "none" : "0");
 		integer_set(address, field->size, none_allowed ? NONE : 0);
@@ -955,7 +984,8 @@ static boolean definition_fits(
 	return TRUE;
 }
 
-/* whether every group's schema fits (definition_fits), found once */
+/* whether every group's schema fits (definition_fits), Custom Edition's
+too, found once */
 static boolean schemas_fit(
 	void)
 {
@@ -964,12 +994,16 @@ static boolean schemas_fit(
 	if (fit == NONE)
 	{
 		struct tag_schema_group const *const *list;
+		struct tag_schema_group const *group;
 
 		fit = TRUE;
+		for (group = tag_schema_custom_edition_groups; group->group_tag && fit; group++)
+		{
+			if (group->definition && !definition_fits(group->definition, 0))
+				fit = FALSE;
+		}
 		for (list = tag_schema_group_lists; *list && fit; list++)
 		{
-			struct tag_schema_group const *group;
-
 			for (group = *list; group->group_tag && fit; group++)
 			{
 				if (group->definition && !definition_fits(group->definition, 0))
@@ -1124,6 +1158,27 @@ static boolean validate_tag_table(
 		validate_instance(validation, &instances[absolute_index], _pass_values);
 	for (absolute_index = 0; absolute_index < tag_count && !validation->refused; absolute_index++)
 		validate_instance(validation, &instances[absolute_index], _pass_checks);
+
+	/* each tag's name, now that every root, block and data is claimed: a
+	name in any of their bytes could lose its terminator to what is written
+	there (the corrections above, the game's runtime values), and is none.
+	(Tags may share a name: names are only read) */
+	for (absolute_index = 0; absolute_index < tag_count && !validation->refused; absolute_index++)
+	{
+		struct tag_validate_instance *instance = &instances[absolute_index];
+
+		if (instance->name == tag_validate_empty_name)
+			continue;
+		validation->tag_index = instance->tag_index;
+		validation->depth = 0;
+		validation->field_name = NULL;
+		if (!string_valid(validation, instance->name) ||
+			tag_validate_any_claimed(instance->name, (unsigned long)strlen(instance->name) + 1))
+		{
+			instance->name = (char *)tag_validate_empty_name;
+			tag_validate_correct(validation, "has its name in a tag's data: none");
+		}
+	}
 
 	tag_validate_globals.corrections = validation->corrections;
 

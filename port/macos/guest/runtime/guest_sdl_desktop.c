@@ -13,9 +13,11 @@ and with structures that hold pointers passed as their parts.
 
 /* before SDL: musl's alloca.h must come first */
 #include <pthread.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <SDL3/SDL.h>
 
@@ -66,6 +68,178 @@ const char *SDL_GetAudioDeviceName(SDL_AudioDeviceID device)
     return name[0] ? name : NULL;
 }
 
+/* ---------- filesystem and synchronization SDL keeps in its library */
+
+static int guest_glob_match(const char *pattern, const char *text, int insensitive)
+{
+	while (*pattern)
+	{
+		if (*pattern == '*')
+		{
+			while (*pattern == '*')
+				pattern++;
+			if (!*pattern)
+				return 1;
+			while (*text)
+				if (guest_glob_match(pattern, text++, insensitive))
+					return 1;
+			return 0;
+		}
+		if (!*text || (*pattern != '?' && *pattern != *text &&
+			(!insensitive || (*pattern | 32) != (*text | 32))))
+			return 0;
+		pattern++;
+		text++;
+	}
+	return !*text;
+}
+
+char **SDL_GlobDirectory(const char *path, const char *pattern, SDL_GlobFlags flags, int *count)
+{
+	DIR *directory;
+	struct dirent *entry;
+	char **names = NULL, **result;
+	int used = 0, capacity = 0, index;
+	size_t bytes = 0;
+
+	if (count)
+		*count = 0;
+	directory = opendir(path);
+	if (!directory)
+		return NULL;
+	while ((entry = readdir(directory)) != NULL)
+	{
+		char *name;
+
+		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+			(pattern && !guest_glob_match(pattern, entry->d_name, flags & SDL_GLOB_CASEINSENSITIVE)))
+			continue;
+		if (used == capacity)
+		{
+			int next = capacity ? capacity * 2 : 16;
+			char **grown = realloc(names, (size_t)next * sizeof(*names));
+
+			if (!grown)
+				break;
+			names = grown;
+			capacity = next;
+		}
+		name = strdup(entry->d_name);
+		if (!name)
+			break;
+		names[used++] = name;
+		bytes += strlen(name) + 1;
+	}
+	closedir(directory);
+	result = malloc((size_t)(used + 1) * sizeof(*result) + bytes);
+	if (result)
+	{
+		char *text = (char *)(result + used + 1);
+
+		for (index = 0; index < used; index++)
+		{
+			result[index] = text;
+			text += sprintf(text, "%s", names[index]) + 1;
+		}
+		result[used] = NULL;
+	}
+	for (index = 0; index < used; index++)
+		free(names[index]);
+	free(names);
+	if (!result)
+		return NULL;
+	if (count)
+		*count = used;
+	return result;
+}
+
+bool SDL_GetPathInfo(const char *path, SDL_PathInfo *info)
+{
+	struct stat state;
+
+	if (stat(path, &state))
+		return false;
+	if (info)
+	{
+		memset(info, 0, sizeof(*info));
+		info->type = S_ISREG(state.st_mode) ? SDL_PATHTYPE_FILE :
+			(S_ISDIR(state.st_mode) ? SDL_PATHTYPE_DIRECTORY : SDL_PATHTYPE_OTHER);
+		info->size = (Uint64)state.st_size;
+		info->create_time = (SDL_Time)state.st_ctime;
+		info->modify_time = (SDL_Time)state.st_mtime;
+		info->access_time = (SDL_Time)state.st_atime;
+	}
+	return true;
+}
+
+struct guest_sdl_condition
+{
+	pthread_cond_t condition;
+};
+
+SDL_Condition *SDL_CreateCondition(void)
+{
+	struct guest_sdl_condition *condition = malloc(sizeof(*condition));
+
+	if (condition && pthread_cond_init(&condition->condition, NULL))
+	{
+		free(condition);
+		condition = NULL;
+	}
+	return (SDL_Condition *)condition;
+}
+
+void SDL_DestroyCondition(SDL_Condition *condition)
+{
+	if (condition)
+	{
+		pthread_cond_destroy(&((struct guest_sdl_condition *)condition)->condition);
+		free(condition);
+	}
+}
+
+void SDL_SignalCondition(SDL_Condition *condition)
+{
+	if (condition)
+		pthread_cond_signal(&((struct guest_sdl_condition *)condition)->condition);
+}
+
+void SDL_BroadcastCondition(SDL_Condition *condition)
+{
+	if (condition)
+		pthread_cond_broadcast(&((struct guest_sdl_condition *)condition)->condition);
+}
+
+bool SDL_WaitConditionTimeout(SDL_Condition *condition, SDL_Mutex *mutex, Sint32 milliseconds)
+{
+	struct timespec deadline;
+	int result;
+
+	if (!condition || !mutex)
+		return false;
+	if (milliseconds < 0)
+		return pthread_cond_wait(&((struct guest_sdl_condition *)condition)->condition,
+			(pthread_mutex_t *)mutex) == 0;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += milliseconds / 1000;
+	deadline.tv_nsec += (long)(milliseconds % 1000) * 1000000L;
+	if (deadline.tv_nsec >= 1000000000L)
+	{
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000L;
+	}
+	result = pthread_cond_timedwait(&((struct guest_sdl_condition *)condition)->condition,
+		(pthread_mutex_t *)mutex, &deadline);
+	return result == 0;
+}
+
+SDL_Keycode SDL_GetKeyFromScancode(SDL_Scancode scancode, SDL_Keymod modstate, bool key_event)
+{
+	(void)modstate;
+	(void)key_event;
+	return SDL_SCANCODE_TO_KEYCODE(scancode);
+}
+
 /* ---------- atomics and mutexes */
 
 int SDL_SetAtomicInt(SDL_AtomicInt *a, int v)
@@ -76,6 +250,11 @@ int SDL_SetAtomicInt(SDL_AtomicInt *a, int v)
 int SDL_GetAtomicInt(SDL_AtomicInt *a)
 {
 	return __atomic_load_n(&a->value, __ATOMIC_SEQ_CST);
+}
+
+int SDL_AddAtomicInt(SDL_AtomicInt *a, int v)
+{
+	return __atomic_fetch_add(&a->value, v, __ATOMIC_SEQ_CST);
 }
 
 SDL_Mutex *SDL_CreateMutex(void)
@@ -378,6 +557,154 @@ const SDL_DisplayMode *SDL_GetCurrentDisplayMode(SDL_DisplayID displayID)
 	return &mode;
 }
 
+SDL_DisplayMode **SDL_GetFullscreenDisplayModes(SDL_DisplayID displayID, int *count)
+{
+	const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(displayID);
+	SDL_DisplayMode **modes;
+
+	if (count)
+		*count = 0;
+	if (!mode)
+		return NULL;
+	modes = malloc(sizeof(*modes));
+	if (!modes)
+		return NULL;
+	modes[0] = (SDL_DisplayMode *)mode;
+	if (count)
+		*count = 1;
+	return modes;
+}
+
+bool SDL_GetClosestFullscreenDisplayMode(SDL_DisplayID displayID, int width, int height, float refresh_rate,
+	bool include_high_density_modes, SDL_DisplayMode *closest)
+{
+	const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(displayID);
+
+	(void)width;
+	(void)height;
+	(void)refresh_rate;
+	(void)include_high_density_modes;
+	if (!mode || !closest)
+		return false;
+	*closest = *mode;
+	return true;
+}
+
+bool SDL_GetDisplayUsableBounds(SDL_DisplayID displayID, SDL_Rect *rect)
+{
+	const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(displayID);
+
+	if (!mode || !rect)
+		return false;
+	rect->x = rect->y = 0;
+	rect->w = mode->w;
+	rect->h = mode->h;
+	return true;
+}
+
+SDL_PropertiesID SDL_GetWindowProperties(SDL_Window *window)
+{
+	(void)window;
+	return 0;
+}
+
+bool SDL_GetBooleanProperty(SDL_PropertiesID props, const char *name, bool fallback)
+{
+	(void)props;
+	(void)name;
+	return fallback;
+}
+
+float SDL_GetFloatProperty(SDL_PropertiesID props, const char *name, float fallback)
+{
+	(void)props;
+	(void)name;
+	return fallback;
+}
+
+const char *SDL_GetCurrentVideoDriver(void)
+{
+	return "cocoa";
+}
+
+SDL_Window *SDL_GetKeyboardFocus(void)
+{
+	return NULL;
+}
+
+bool SDL_SetWindowMouseGrab(SDL_Window *window, bool grabbed)
+{
+	(void)window;
+	(void)grabbed;
+	return true;
+}
+
+bool SDL_ShowCursor(void)
+{
+	return true;
+}
+
+bool SDL_HideCursor(void)
+{
+	return true;
+}
+
+SDL_PropertiesID SDL_CreateProperties(void)
+{
+	return 1;
+}
+
+void SDL_DestroyProperties(SDL_PropertiesID props)
+{
+	(void)props;
+}
+
+bool SDL_SetBooleanProperty(SDL_PropertiesID props, const char *name, bool value)
+{
+	(void)props;
+	(void)name;
+	(void)value;
+	return true;
+}
+
+bool SDL_SetNumberProperty(SDL_PropertiesID props, const char *name, Sint64 value)
+{
+	(void)props;
+	(void)name;
+	(void)value;
+	return true;
+}
+
+bool SDL_StartTextInputWithProperties(SDL_Window *window, SDL_PropertiesID props)
+{
+	(void)window;
+	(void)props;
+	return true;
+}
+
+bool SDL_TextInputActive(SDL_Window *window)
+{
+	(void)window;
+	return false;
+}
+
+bool SDL_StopTextInput(SDL_Window *window)
+{
+	(void)window;
+	return true;
+}
+
+bool SDL_HasScreenKeyboardSupport(void)
+{
+	return false;
+}
+
+bool SDL_GetHintBoolean(const char *name, bool fallback)
+{
+	(void)name;
+	return fallback;
+}
+
 Uint64 SDL_GetTicksNS(void)
 {
 	return (Uint64)host_sdl_ticks_ns();
@@ -488,7 +815,7 @@ bool SDL_ShowMessageBox(const SDL_MessageBoxData *messageboxdata, int *buttonid)
 		used += length;
 		count++;
 	}
-	result = host_sdl_show_message_box((unsigned int)messageboxdata->flags, messageboxdata->title,
+	result = host_macos_sdl_show_message_box((unsigned int)messageboxdata->flags, messageboxdata->title,
 		messageboxdata->message, count, flags, ids, texts, &chosen);
 	if (buttonid)
 		*buttonid = chosen;

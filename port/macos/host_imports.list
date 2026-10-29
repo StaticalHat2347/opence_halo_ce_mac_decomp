@@ -14,6 +14,7 @@ host_memory_watch_generation
 host_memory_watch_serial
 host_memory_watch_prepare_write
 host_memory_watch_forget
+host_memory_watch_begin_frame
 host_sdl_init
 host_sdl_set_hint
 host_sdl_get_error
@@ -39,6 +40,7 @@ host_sdl_gamepad_axis
 host_sdl_gamepad_button
 host_sdl_gamepad_type
 host_sdl_rumble_gamepad
+host_sdl_close_gamepad
 host_sdl_scancode_name
 host_sdl_scancode_from_name
 host_sdl_open_audio_stream
@@ -82,8 +84,28 @@ host_sdl_render_clear
 host_sdl_render_fill_rect
 host_sdl_render_debug_text
 host_sdl_render_present
-host_sdl_show_message_box
+host_macos_sdl_show_message_box
 host_sdl_show_open_file_dialog
 host_sdl_file_dialog_result
 host_server_browser_fetch
 host_server_browser_result
+
+# Dedicated-server services run in the host.
+posix_server_signals_install
+posix_server_signals_take
+posix_server_quit_deadline
+posix_server_stdout_line_buffered
+posix_server_stdin_is_terminal
+posix_server_stdin_read
+posix_server_resident_bytes
+posix_server_cpu_milliseconds
+posix_server_rename
+posix_server_write_file
+posix_server_private_file
+posix_server_write_private_file
+posix_server_remove
+posix_server_unix_seconds
+posix_server_unix_milliseconds
+posix_server_utc_text
+posix_server_local_text
+update_https_request

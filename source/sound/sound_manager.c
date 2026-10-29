@@ -638,7 +638,8 @@ static long looping_sound_new(
 	long definition_index,
 	long identifier,
 	struct sound_source const *source);
-static void sound_set_definition_end(
+/* port: report whether instance limiting leaves this voice alive. */
+static boolean sound_set_definition_end(
 	long sound_index);
 static long update_potentially_audible_looping_sound(
 	long definition_index,
@@ -1186,6 +1187,20 @@ static boolean refresh_sound(
 		sound->playing_channel_index==NONE ||
 			channel_get(sound->playing_channel_index)->sound_index==sound_index);
 
+	/* port: a track of a looping sound that is gone stops, even when it
+	started this millisecond. The test of the start time below skips the
+	tracking, which is what notices the looping sound is gone, and a
+	looping sound not refreshed since the last frame is deleted
+	(process_looping_sounds): with three frames in one millisecond (no
+	frame limit, the null renderer) the track went on to
+	update_channel_for_looping_sound, which read the deleted looping
+	sound. BUG (original): the Xbox's frames were never that close. */
+	if (sound->type != _sound_impulse &&
+		!datum_try_and_get(looping_sound_data, sound->source_identifier))
+	{
+		return FALSE;
+	}
+
 	if (TEST_FLAG(sound->flags, _sound_delayed_bit) ||
 		!sound->track_proc ||
 		sound->start_time >= sound_manager_globals.render_time ||
@@ -1503,7 +1518,7 @@ static long looping_sound_new(
 	return looping_sound_index;
 }
 
-static void sound_set_definition_end(
+static boolean sound_set_definition_end(
 	long sound_index)
 {
 	struct sound_datum *sound = sound_get(sound_index);
@@ -1544,18 +1559,23 @@ static void sound_set_definition_end(
 		}
 		else
 		{
-			return;
+			return TRUE;
 		}
 
 		if (channel_index != NONE)
 		{
-			sound_index = channel_get(channel_index)->sound_index;
+			/* port: sound_find_like_channel excludes the current voice. */
+			sound_stop(channel_get(channel_index)->sound_index);
+			return TRUE;
 		}
 
+		/* port: no other voice can be preempted; tell the caller this one
+		was retired before it writes to the freed channel. */
 		sound_stop(sound_index);
+		return FALSE;
 	}
 
-	return;
+	return TRUE;
 }
 
 static long update_potentially_audible_looping_sound(
@@ -1902,6 +1922,31 @@ static void sound_start_fade(
 	return;
 }
 
+/* port: retire every owned intro/loop voice when the primary handle changes. */
+static void sound_fade_looping_track_components(
+	long looping_sound_index,
+	short track_index,
+	long except_sound_index,
+	real seconds)
+{
+	long sound_index;
+
+	for (sound_index = data_next_index(sound_data, NONE);
+		sound_index != NONE;
+		sound_index = data_next_index(sound_data, sound_index))
+	{
+		struct sound_datum *sound = sound_get(sound_index);
+
+		if (sound_index != except_sound_index &&
+			(sound->type == _sound_start_track || sound->type == _sound_loop_track) &&
+			sound->source_identifier == looping_sound_index &&
+			sound->loop_track_index == track_index)
+		{
+			sound_start_fade(_sound_fade_mode_linear, seconds, NONE, sound_index);
+		}
+	}
+}
+
 static short channel_get_state(
 	short channel_index)
 {
@@ -2068,7 +2113,7 @@ static real source_distance_squared(
 	short listener_index,
 	struct sound_source *source)
 {
-	real distance_squared;
+	real distance_squared = 0.0f;
 
 	switch (source->spatialization_mode)
 	{
@@ -2093,10 +2138,6 @@ static real source_distance_squared(
 			source->location.position.z * source->location.position.z;
 		break;
 
-	/* distance_squared is left unassigned only by this default arm. Not reached unassigned: the
-	 * arm's assertion failure calls system_exit, which does not return in January
-	 * (0x47c960 jumps to halt_and_catch_fire 0x4f21c0, which loops or calls exit).
-	 * Source-policy approval pending (2026-09-27 audit). */
 	default:
 		match_vassert(
 			"c:\\halo\\SOURCE\\sound\\sound_manager.c",
@@ -2562,9 +2603,14 @@ long sound_new_impulse(
 		}
 		else
 		{
+			/* (port: which sound, and what it is) */
 			error(
 				_error_silent,
-				"attempt to play a sound that was not a mono 22k compressed sound or a stereo 22k or 44k compressed sound.");
+				"attempt to play a sound that was not a mono 22k compressed sound or a stereo 22k or 44k compressed sound: %s (compression %d, encoding %d, sample rate %d)",
+				tag_get_name(definition_index),
+				definition->compression,
+				definition->encoding,
+				definition->sample_rate);
 		}
 	}
 
@@ -2658,6 +2704,14 @@ boolean sound_refresh_looping(
 
 					if (refresh_state == _looping_sound_refresh_start)
 					{
+						/* port: a restart must retire the old primary and pending components. */
+						if (track->start_sound.index != NONE ||
+							TEST_FLAG(track->flags, _fade_in_at_start_bit))
+						{
+							sound_fade_looping_track_components(
+								looping_sound_index, track_index, NONE,
+								track->fade_out_duration);
+						}
 						if (track->start_sound.index != NONE)
 						{
 							*playing_sound_index =
@@ -2753,6 +2807,16 @@ boolean sound_refresh_looping(
 					}
 					else if (loop->state != _looping_sound_refresh_stop)
 					{
+						/* port: stopping the loop also stops its other owned components. */
+						if (fade_time != 0.f ||
+							TEST_FLAG(track->flags, _fade_out_at_stop_bit) ||
+							(track->stop_sound.index == NONE &&
+								!TEST_FLAG(definition->flags, _looping_sound_fake_impulse_sound_bit)))
+						{
+							sound_fade_looping_track_components(
+								looping_sound_index, track_index, *playing_sound_index,
+								fade_time != 0.f ? fade_time : track->fade_out_duration);
+						}
 						if (fade_time != 0.f)
 						{
 							sound_start_fade(
@@ -2962,7 +3026,11 @@ static void update_channel_for_looping_sound(
 					(!channel->playing_permutation ||
 						channel->playing_permutation->next_permutation_index == NONE))
 				{
-					sound_set_definition_end(channel->sound_index);
+					/* port: a definition transition can retire its own voice. */
+					if (!sound_set_definition_end(channel->sound_index))
+					{
+						return;
+					}
 					definition = sound_definition_get(sound->definition_index);
 					pitch_range = TAG_BLOCK_GET_ELEMENT(
 						&definition->pitch_ranges,
@@ -3206,6 +3274,31 @@ void sound_dispose_from_old_map(
 	if (looping_sound_data)
 	{
 		data_delete_all(looping_sound_data);
+	}
+
+	/* port: a channel still holding a permutation that no sound owns any
+	longer (a weapon's charging loop, as a network game ended) stopped too,
+	so that its cache count is given back while the map's sounds are still
+	there; else the next map's sound_render finished it against the next
+	map's sound cache (sound_cache_sound_finished: "xbox sound index ... is
+	unused or changed") */
+	if (sound_manager_globals.initialized)
+	{
+		short channel_index;
+
+		for (
+			channel_index = 0;
+			channel_index < sound_manager_globals.channel_count;
+			channel_index++)
+		{
+			struct sound_channel_datum *channel = channel_get(channel_index);
+
+			if (channel->playing_permutation || channel->queued_permutation)
+			{
+				channel_stop(channel_index);
+				channel->sound_index = NONE;
+			}
+		}
 	}
 
 	return;

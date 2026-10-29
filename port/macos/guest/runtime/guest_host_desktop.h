@@ -36,7 +36,7 @@ int host_sdl_render_clear(unsigned int renderer);
 int host_sdl_render_fill_rect(unsigned int renderer, const float *rectangle);
 int host_sdl_render_debug_text(unsigned int renderer, float x, float y, const char *text);
 int host_sdl_render_present(unsigned int renderer);
-int host_sdl_show_message_box(unsigned int flags, const char *title, const char *message, int count,
+int host_macos_sdl_show_message_box(unsigned int flags, const char *title, const char *message, int count,
 	const int *button_flags, const int *button_ids, const char *texts, int *chosen);
 void host_sdl_show_open_file_dialog(const char *filters, int count);
 int host_sdl_file_dialog_result(char *buffer, unsigned int size);

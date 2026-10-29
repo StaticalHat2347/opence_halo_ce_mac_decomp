@@ -100,6 +100,7 @@ symbols in this file:
 #include "real_math.h"
 #include "console.h"
 #include "game_state.h"
+#include "coop_vehicles.h" /* port: preserve replacement-vehicle homes across reverts */
 #include "game.h"
 #include "tag_files.h"
 #include "cache_files.h"
@@ -181,6 +182,8 @@ typedef void (*game_state_before_save_proc)(void);
 static game_state_before_save_proc before_save_procs[] =
 {
 	dummy,
+	/* port: the host's vehicle home table follows the saved object handles. */
+	coop_vehicles_before_save,
 };
 
 static game_state_before_load_proc before_load_procs[] =
@@ -207,7 +210,9 @@ static game_state_after_load_proc after_load_procs[] =
 	game_state_set_revert_time,
 	player_control_fix_for_loaded_game_state,
 	director_initialize_for_saved_game,
-	scripted_hud_messages_clear
+	scripted_hud_messages_clear,
+	/* port: restore matching homes or forget an unrelated disk/core load. */
+	coop_vehicles_after_load
 };
 
 /* ---------- public code */
@@ -300,7 +305,9 @@ void game_state_initialize_for_new_map(
 	memset(game_state_globals.header, 0, sizeof(*game_state_globals.header));
 
 	name = tag_get_name(global_scenario_index);
-	strcpy(game_state_globals.header->map_name, name);
+	/* port: no longer than the header has room for (a map's scenario's
+	name is the map's) */
+	strncpy(game_state_globals.header->map_name, name, sizeof(game_state_globals.header->map_name) - 1);
 	strcpy(game_state_globals.header->build_number, "01.01.14.2342");
 
 	game_state_globals.header->player_count = player_spawn_count;

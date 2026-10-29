@@ -21,7 +21,6 @@ high-res HUD's are (hud_hires.c).
 #include "hud_hires.h"
 #include "menu_files.h"
 #include "platform.h"
-#include "posix.h"
 #include "port_config.h"
 #include "xgpu.h"
 
@@ -100,7 +99,7 @@ static long file_add(const char *path, const unsigned char *data, unsigned long 
 
 static unsigned char *file_read(const char *path, unsigned long *size)
 {
-#ifdef HALO_ANDROID
+#ifdef HALO_ARM64_GUEST
 	FILE *file = fopen(path, "rb");
 	unsigned char *data = NULL;
 	long length;
@@ -168,71 +167,33 @@ static void files_gather(void)
 	}
 #ifndef HALO_ANDROID
 	{
-		void *directory;
-		char name[1024];
+		/* (the folder's own and its folders': SDL's * does not cross a /) */
+		static const char *const patterns[] = { "*.xml", "*/*.xml" };
+		int pattern;
 
-		/* XML files directly in the menus folder */
-		directory = posix_directory_open(folder);
-		while (directory && posix_directory_next(directory, name, sizeof(name)))
+		for (pattern = 0; pattern < 2; pattern++)
 		{
-			size_t length = strlen(name);
+		int count = 0;
+		char **names = SDL_GlobDirectory(folder, patterns[pattern], 0, &count);
+		int name;
+
+		for (name = 0; names && name < count; name++)
+		{
 			unsigned long size = 0;
 			unsigned char *data;
 
-			if (length < 4 || strcmp(name + length - 4, ".xml"))
+			if (file_find(names[name]) >= 0)
 				continue;
-			if (file_find(name) >= 0)
-				continue;
-
-			snprintf(path, sizeof(path), "%s/%s", folder, name);
+			snprintf(path, sizeof(path), "%s/%s", folder, names[name]);
 			data = file_read(path, &size);
 			if (data)
 			{
 				platform_log("menus: adding %s", path);
-				file_add(name, data, size, 1);
+				file_add(names[name], data, size, 1);
 			}
 		}
-		if (directory)
-			posix_directory_close(directory);
-
-		/* XML files one directory below the menus folder */
-		directory = posix_directory_open(folder);
-		while (directory && posix_directory_next(directory, name, sizeof(name)))
-		{
-			void *subdirectory;
-			char subfolder[1200];
-			char child[1024];
-
-			snprintf(subfolder, sizeof(subfolder), "%s/%s", folder, name);
-			subdirectory = posix_directory_open(subfolder);
-			while (subdirectory &&
-				posix_directory_next(subdirectory, child, sizeof(child)))
-			{
-				char relative[1200];
-				size_t length = strlen(child);
-				unsigned long size = 0;
-				unsigned char *data;
-
-				if (length < 4 || strcmp(child + length - 4, ".xml"))
-					continue;
-
-				snprintf(relative, sizeof(relative), "%s/%s", name, child);
-				if (file_find(relative) >= 0)
-					continue;
-
-				snprintf(path, sizeof(path), "%s/%s", folder, relative);
-				data = file_read(path, &size);
-				if (data)
-				{
-					platform_log("menus: adding %s", path);
-					file_add(relative, data, size, 1);
-				}
-			}
-			if (subdirectory)
-				posix_directory_close(subdirectory);
+		SDL_free(names);
 		}
-		if (directory)
-			posix_directory_close(directory);
 	}
 #endif
 }
@@ -426,7 +387,17 @@ static long current_line(struct reader *reader)
 	return (long)XML_GetCurrentLineNumber(reader->parser);
 }
 
-/* whether the element is for this platform (its platform attribute) */
+/* this build's platform, as the platform attribute names it */
+#ifdef HALO_ANDROID
+#define MENU_PLATFORM "android"
+#elif defined(HALO_WEB)
+#define MENU_PLATFORM "web"
+#else
+#define MENU_PLATFORM "desktop"
+#endif
+
+/* whether the element is for this platform (its platform attribute: the
+platforms it is for, separated by spaces) */
 static int for_this_platform(struct reader *reader, const XML_Char **attributes)
 {
 	int index;
@@ -435,18 +406,30 @@ static int for_this_platform(struct reader *reader, const XML_Char **attributes)
 	{
 		if (!strcmp(attributes[index], "platform"))
 		{
-			const char *platform = attributes[index + 1];
+			const char *name = attributes[index + 1];
+			int found = 0;
 
-			if (strcmp(platform, "desktop") && strcmp(platform, "android"))
+			while (*name)
 			{
-				reader_error(reader, "platform=\"%s\" is not \"desktop\" or \"android\"", platform);
-				return 1;
+				size_t length = strcspn(name, " ");
+
+				if (length)
+				{
+					if ((length != 7 || strncmp(name, "desktop", 7)) && (length != 7 || strncmp(name, "android", 7)) &&
+						(length != 3 || strncmp(name, "web", 3)))
+					{
+						reader_error(reader, "platform=\"%s\" names one that is not desktop, android or web",
+							attributes[index + 1]);
+						return 1;
+					}
+					if (length == strlen(MENU_PLATFORM) && !strncmp(name, MENU_PLATFORM, length))
+						found = 1;
+				}
+				name += length;
+				while (*name == ' ')
+					name++;
 			}
-#ifdef HALO_ANDROID
-			return !strcmp(platform, "android");
-#else
-			return !strcmp(platform, "desktop");
-#endif
+			return found;
 		}
 	}
 	return 1;
@@ -594,7 +577,7 @@ static void read_strings(struct reader *reader, const XML_Char **attributes)
 {
 	struct halo_menus *menus = &reader->menus;
 	struct halo_menu_strings strings;
-	struct attribute table[] = { { "name", &strings.name } };
+	struct attribute table[] = { { "name", &strings.name }, { "map", &strings.map } };
 
 	memset(&strings, 0, sizeof(strings));
 	strings.first = menus->string_count;
@@ -611,11 +594,16 @@ static void read_string(struct reader *reader, const XML_Char **attributes, long
 {
 	struct halo_menus *menus = &reader->menus;
 	const char *text = NULL;
-	struct attribute table[] = { { "text", &text } };
+	long map = HALO_MENU_NONE, map_given = 0;
+	struct attribute table[] = { { "text", &text }, { "map", NULL, &map, &map_given } };
 
 	read_attributes(reader, "string", attributes, table, sizeof(table) / sizeof(*table));
 	if (!reader->failed && !text)
 		reader_error(reader, "a <string> needs text");
+	if (!reader->failed && map_given && (map < 0 || !menus->string_lists[owner].map))
+		reader_error(reader, "a <string>'s map= is an index in its <strings>' map list");
+	GROW(reader, menus->string_maps, menus->string_count);
+	menus->string_maps[menus->string_count] = map_given ? map : HALO_MENU_NONE;
 	GROW(reader, menus->strings, menus->string_count);
 	menus->strings[menus->string_count++] = text ? text : "";
 	menus->string_lists[owner].count++;
@@ -1076,7 +1064,10 @@ void halo_menus_art_register(void const *texture, char const *png)
 	{
 		free(art[index].png);
 		if (art[index].texture)
+		{
+			xgpu_gl_texture_deleted(art[index].texture);
 			glDeleteTextures(1, &art[index].texture);
+		}
 	}
 	memset(&art[index], 0, sizeof(art[index]));
 	art[index].data = data;
@@ -1091,7 +1082,10 @@ void halo_menus_art_forget(void)
 	{
 		free(art[index].png);
 		if (art[index].texture)
+		{
+			xgpu_gl_texture_deleted(art[index].texture);
 			glDeleteTextures(1, &art[index].texture);
+		}
 	}
 	art_count = 0;
 }

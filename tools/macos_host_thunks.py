@@ -39,7 +39,7 @@ def prototypes(path):
     text = re.sub(r"^\s*#.*$", "", text, flags=re.M)
     text = re.sub(r"__attribute__\s*\(\(.*?\)\)", "", text)
     result = {}
-    for ret, name, params in re.findall(r"([A-Za-z_][\w \*]*?)\b((?:host|posix)_\w+)\s*\(([^;{]*?)\)\s*;", text, re.S):
+    for ret, name, params in re.findall(r"([A-Za-z_][\w \*]*?)\b((?:host|posix|update)_\w+)\s*\(([^;{]*?)\)\s*;", text, re.S):
         ret = " ".join(ret.split())
         params = " ".join(params.split())
         parsed = []

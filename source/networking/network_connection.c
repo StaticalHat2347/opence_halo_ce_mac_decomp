@@ -212,6 +212,7 @@ symbols in this file:
 #include "bungie_net/network/transport_endpoint_winsock.h"
 #include "memory/circular_queue.h"
 #include "network_connection.h"
+#include "networking/network_messages.h" /* port: NETWORK_GAME_CLIENT_PORT */
 
 /* ---------- constants */
 
@@ -298,6 +299,10 @@ struct network_server_connection
 	boolean allow_client_connections;
 };
 
+/* port: what the unreliable queue keeps after each datagram: its source's
+IPv4 address and port */
+#define DATAGRAM_SOURCE_SIZE (sizeof(unsigned long) + sizeof(word))
+
 /* ---------- prototypes */
 
 static boolean network_client_reliable_connection_read(
@@ -305,6 +310,10 @@ static boolean network_client_reliable_connection_read(
 	void *message,
 	word *buffer_size,
 	struct transport_address *source_address);
+/* port: (below) */
+static word network_connection_datagram_port(
+	struct network_connection *connection,
+	word well_known_port);
 static struct network_connection *network_connection_create_client_from_endpoint(
 	struct transport_endpoint *reliable_endpoint);
 static boolean network_connection_idle_client_reliable_endpoint(
@@ -486,6 +495,15 @@ boolean network_connection_connect(
 		return FALSE;
 	}
 	success = TRUE;
+	/* port: a connection made is open, whatever came before it. A write
+	made before connecting (while searching for games, to no socket yet)
+	marked it closed, and every write of the join request then failed. */
+	SET_FLAG(connection->flags, _connection_closed_bit, FALSE);
+	SET_FLAG(connection->flags, _connection_going_stale_bit, FALSE);
+	if (connection->reliable_outgoing_queue)
+	{
+		circular_queue_reset(connection->reliable_outgoing_queue);
+	}
 
 	if (connection->unreliable_endpoint)
 	{
@@ -619,6 +637,9 @@ static boolean network_client_unreliable_connection_read(
 {
 	message_header header;
 	unsigned long source_ipv4_address;
+	/* port: the datagram's source port, kept after its address
+	(DATAGRAM_SOURCE_SIZE) */
+	word source_port;
 	word message_size;
 
 	match_assert(
@@ -662,9 +683,11 @@ static boolean network_client_unreliable_connection_read(
 				message_size,
 				*buffer_size);
 		}
-		else if (message_size + sizeof(source_ipv4_address) <= (unsigned long)circular_queue_size(connection->unreliable_incoming_queue) &&
+		/* port: and its source port (DATAGRAM_SOURCE_SIZE) */
+		else if (message_size + DATAGRAM_SOURCE_SIZE <= (unsigned long)circular_queue_size(connection->unreliable_incoming_queue) &&
 			circular_queue_dequeue_data(connection->unreliable_incoming_queue, message, message_size, TRUE) &&
-			circular_queue_dequeue_data(connection->unreliable_incoming_queue, &source_ipv4_address, sizeof(source_ipv4_address), TRUE))
+			circular_queue_dequeue_data(connection->unreliable_incoming_queue, &source_ipv4_address, sizeof(source_ipv4_address), TRUE) &&
+			circular_queue_dequeue_data(connection->unreliable_incoming_queue, &source_port, sizeof(source_port), TRUE))
 		{
 			*(message_header *)message = header;
 			match_vassert(
@@ -675,7 +698,8 @@ static boolean network_client_unreliable_connection_read(
 			if (source_address)
 			{
 				source_address->address.long_words[0] = source_ipv4_address;
-				source_address->port = 0;
+				/* port: the port kept, where the Xbox had 0 */
+				source_address->port = source_port;
 				source_address->address_length = IPV4_ADDRESS_LENGTH;
 			}
 			*buffer_size = message_size;
@@ -1187,7 +1211,9 @@ struct network_connection *network_connection_new(
 
 			address.address_length = IPV4_ADDRESS_LENGTH;
 			address.address.long_words[0] = 0;
-			address.port = well_known_port;
+			/* port: a client's free port, if another game has the client
+			port (network_connection_datagram_port) */
+			address.port = network_connection_datagram_port(connection, well_known_port);
 			connection->well_known_port = well_known_port;
 			if (bind_endpoint(connection->unreliable_endpoint, &address) ||
 				set_endpoint_blocking(connection->unreliable_endpoint, FALSE))
@@ -1233,6 +1259,22 @@ struct network_connection *network_connection_new(
 	}
 
 	return connection;
+}
+
+/* port: a client binds any free port when another game on this computer
+already has the client port. SO_REUSEADDR would let both bind it, and
+Windows would deliver the host's datagrams to only one of them. */
+static word network_connection_datagram_port(
+	struct network_connection *connection,
+	word well_known_port)
+{
+	if (TEST_FLAG(connection->flags, _connection_create_clientside_client_bit) &&
+		transport_udp_port_taken(well_known_port))
+	{
+		network_event("the client port %d is another game's; listening on another", well_known_port);
+		return 0;
+	}
+	return well_known_port;
 }
 
 static boolean network_client_reliable_connection_read(
@@ -1475,9 +1517,10 @@ boolean network_connection_disconnect(
 
 		address.address_length = IPV4_ADDRESS_LENGTH;
 		address.address.ipv4_address = 0;
-		address.port = connection->well_known_port;
-
 		delete_transport_endpoint(connection->unreliable_endpoint);
+		/* port: (network_connection_datagram_port, once the old endpoint
+		let the port go) */
+		address.port = network_connection_datagram_port(connection, connection->well_known_port);
 		connection->unreliable_address_valid = FALSE;
 		connection->unreliable_endpoint = create_transport_endpoint(_transport_type_udp);
 		success = connection->unreliable_endpoint &&
@@ -1628,7 +1671,8 @@ boolean network_connection_idle(
 	long timeout,
 	struct network_connection **new_client_connection)
 {
-	byte buffer[DATAGRAM_MAXIMUM_SIZE + sizeof(unsigned long)];
+	/* port: room for the source's port too (DATAGRAM_SOURCE_SIZE) */
+	byte buffer[DATAGRAM_MAXIMUM_SIZE + DATAGRAM_SOURCE_SIZE];
 	unsigned long current_time = system_milliseconds();
 	boolean success = TRUE;
 
@@ -1715,7 +1759,8 @@ boolean network_connection_idle(
 		long skipped = 0;
 
 		while (success &&
-			free_space >= DATAGRAM_MAXIMUM_SIZE + sizeof(unsigned long))
+			/* port: (DATAGRAM_SOURCE_SIZE) */
+			free_space >= DATAGRAM_MAXIMUM_SIZE + DATAGRAM_SOURCE_SIZE)
 		{
 			struct transport_address source_address;
 			long buffer_size;
@@ -1786,6 +1831,9 @@ boolean network_connection_idle(
 					&source_ipv4_address,
 					sizeof(source_ipv4_address));
 				buffer_size += sizeof(source_ipv4_address);
+				/* port: and its source port, which the readers take back */
+				csmemcpy(buffer + buffer_size, &source_address.port, sizeof(source_address.port));
+				buffer_size += sizeof(source_address.port);
 				success = circular_queue_queue_data(
 					connection->unreliable_incoming_queue,
 					buffer,
@@ -1909,7 +1957,9 @@ static boolean network_connection_flush_reliable(
 		}
 		else if (sent == _transport_result_operation_would_block)
 		{
-			if (current_time - connection->reliable_outgoing_time >= NETWORK_CONNECTION_WRITE_TIMEOUT)
+			/* port: network.client_timeout_seconds (NETWORK_CONNECTION_WRITE_TIMEOUT
+			by default) */
+			if (current_time - connection->reliable_outgoing_time >= network_client_timeout_milliseconds())
 			{
 				error(_error_silent, "a reliable connection's peer has stopped reading");
 				return FALSE;

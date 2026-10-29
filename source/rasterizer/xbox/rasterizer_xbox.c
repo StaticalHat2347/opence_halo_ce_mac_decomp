@@ -2547,6 +2547,7 @@ void _rasterizer_present(
 				error(_error_silent, "### ERROR rasterizer_present: failed to get backbuffer surface");
 				success = FALSE;
 			}
+			IDirect3DSurface8_Release(d3d_surface);
 		}
 		else
 		{
@@ -2864,6 +2865,21 @@ void rasterizer_set_vertex_shader(
 		if (!success)
 			error(_error_silent, "### ERROR rasterizer_set_vertex_shader failed");
 	}
+	return;
+}
+
+/* port: the loading screen (progress_bar.c) sets the device's vertex shader
+(the fixed-function pipeline), render states and texture stage states
+itself, not through these caches: after it, the next draw sets its vertex
+shader again, and the smart states' shadows are the device's (on the Xbox
+only a map's load followed it; the screen of a map's download is drawn
+over the menus, every frame) */
+void rasterizer_forget_hardware_state(
+	void)
+{
+	rasterizer_state_cache.vertex_shader_index = INVALID_RASTERIZER_HARDWARE_STATE;
+	rasterizer_vertex_shader_runtime_forget();
+	SetupSmartStates();
 	return;
 }
 
@@ -3509,10 +3525,6 @@ void *rasterizer_get_bitmap_default_hardware_format(
 		hardware_format = rasterizer_globals.default_cm_hardware_format;
 		break;
 
-	/* hardware_format is left unassigned only by this default arm. Not reached unassigned: the
-	 * arm's assertion failure calls system_exit, which does not return in January
-	 * (0x47c960 jumps to halt_and_catch_fire 0x4f21c0, which loops or calls exit).
-	 * Source-policy approval pending (2026-09-27 audit). */
 	default:
 		display_assert(
 			"### ERROR unsupported bitmap type",

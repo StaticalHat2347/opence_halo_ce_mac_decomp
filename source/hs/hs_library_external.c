@@ -152,6 +152,10 @@ void hs_object_create_anew(
 	short object_name_index);
 void hs_object_destroy(
 	long object_index);
+boolean hs_unit_can_see_flag(
+	long unit_index,
+	short cutscene_flag_index,
+	real degrees);
 
 /* ---------- globals */
 
@@ -171,8 +175,11 @@ void hs_print(
 	/* port: printed through "%s". January passes the text as the format
 	(0x4b8970 +0x0c pushes it as terminal_printf's format), so a '%' in it,
 	from a scenario script or typed at the console, read arguments that
-	were never passed */
-	terminal_printf(global_real_argb_green, "%s", message);
+	were never passed. A scenario script's print is the game's chatter,
+	which the Xbox never showed: on screen as config.toml's game.console_log
+	says; print typed at the console, always. */
+	if (terminal_shows(terminal_command_running ? _terminal_message_serious : _terminal_message_chatter))
+		terminal_printf(global_real_argb_green, "%s", message);
 
 	return;
 }
@@ -194,6 +201,8 @@ long hs_players(
 		if (player->unit_index != NONE)
 			object_list_add(object_list_index, player->unit_index);
 	}
+	/* port: even an empty (players) list must not open a co-op gate. */
+	object_list_mark_players(object_list_index);
 
 	return object_list_index;
 }
@@ -274,6 +283,32 @@ boolean hs_unit_can_see_object(
 	return result;
 }
 
+/* port: in network co-op a test of the players (the scripts' player0)
+passes for any player, as volume_test_objects_all does (coop_scripts.c), so
+the a10 tutorial's panels light for whoever looks at them: whether any
+player's unit sees the object, or with object_index NONE the cutscene flag */
+static boolean hs_any_player_can_see(
+	long object_index,
+	short cutscene_flag_index,
+	real degrees)
+{
+	struct data_iterator iterator;
+	struct player_datum *player;
+
+	data_iterator_new(&iterator, player_data);
+	while ((player = data_iterator_next(&iterator)) != NULL)
+	{
+		if (player->unit_index != NONE &&
+			(object_index != NONE ? hs_unit_can_see_object(player->unit_index, object_index, degrees) :
+				hs_unit_can_see_flag(player->unit_index, cutscene_flag_index, degrees)))
+		{
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
 boolean hs_objects_can_see_object(
 	long object_list_index,
 	long object_index,
@@ -283,6 +318,8 @@ boolean hs_objects_can_see_object(
 	long unit_index;
 	boolean result;
 
+	if (object_index != NONE && coop_scripts_any_player_will_do(object_list_index))
+		return hs_any_player_can_see(object_index, NONE, degrees);
 	result = FALSE;
 	unit_index = object_list_get_first(object_list_index, &reference_index);
 	while (unit_index != NONE)
@@ -332,6 +369,8 @@ boolean hs_objects_can_see_flag(
 	long reference_index;
 	long unit_index;
 
+	if (coop_scripts_any_player_will_do(object_list_index))
+		return hs_any_player_can_see(NONE, cutscene_flag_index, degrees);
 	unit_index = object_list_get_first(object_list_index, &reference_index);
 	while (unit_index != NONE)
 	{
@@ -857,14 +896,24 @@ boolean hs_trigger_volume_test_objects_all(
 	long object_list_index)
 {
 	boolean inside;
+	boolean waiting = hs_runtime_waiting_on_call();
 
+	/* port: an empty player list during respawn is not an arrival. Empty
+	AI lists retain the original ALL semantics. */
+	if (waiting && coop_scripts_empty_player_list(object_list_index))
+		return FALSE;
 	if (!coop_scripts_any_player_will_do(object_list_index))
 		return hs_trigger_volume_test_objects(trigger_volume_index, object_list_index, TRUE);
 	/* port: in network co-op, waiting for every player means waiting for
 	any one of them, and the rest are brought to them (coop_scripts.c) */
 	inside = hs_trigger_volume_test_objects(trigger_volume_index, object_list_index, FALSE);
-	if (inside && hs_runtime_waiting_on_call())
+	if (inside && waiting)
+	{
 		coop_scripts_gather_in_volume(trigger_volume_index, object_list_index);
+		/* port: gathering may fail or choose a point outside this volume.
+		Do not close an irreversible gate until everyone actually arrived. */
+		inside = hs_trigger_volume_test_objects(trigger_volume_index, object_list_index, TRUE);
+	}
 
 	return inside;
 }
@@ -1004,9 +1053,18 @@ void hs_object_teleport(
 	long object_index,
 	short cutscene_flag_index)
 {
-	hs_object_orient(object_index, cutscene_flag_index, TRUE, TRUE);
-	/* port: co-op players the scripts can't name go with player0 */
-	coop_scripts_teleport_followers(object_index);
+	/* port: followers go to the flag, not to wherever player0 was left when
+	that teleport did not fit */
+	if (object_index != NONE)
+	{
+		struct scenario_cutscene_flag *flag = TAG_BLOCK_GET_ELEMENT(
+			&global_scenario_get()->cutscene_flags,
+			cutscene_flag_index,
+			struct scenario_cutscene_flag);
+
+		hs_object_orient(object_index, cutscene_flag_index, TRUE, TRUE);
+		coop_scripts_teleport_followers(object_index, &flag->position);
+	}
 
 	return;
 }
@@ -1025,9 +1083,20 @@ void hs_teleport_players_not_in_trigger_volume(
 	short cutscene_flag_index)
 {
 	long player_index;
-	/* port: in network co-op the first player moved goes to the flag and
-	the rest around them, instead of all into the same spot */
-	long first_unit_index = NONE;
+	/* port: in network co-op the host spreads players around the flag.
+	A client does not move them; the host's copies arrive with the units. */
+	long arrived[HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
+	short arrived_count = 0;
+	boolean coop = network_coop_active();
+	struct scenario_cutscene_flag *flag = NULL;
+
+	if (coop && game_connection() == _game_connection_network_server)
+	{
+		flag = TAG_BLOCK_GET_ELEMENT(
+			&global_scenario_get()->cutscene_flags,
+			cutscene_flag_index,
+			struct scenario_cutscene_flag);
+	}
 
 	for (player_index = data_next_index(player_data, NONE);
 		player_index != NONE;
@@ -1036,23 +1105,35 @@ void hs_teleport_players_not_in_trigger_volume(
 		struct player_datum *player;
 
 		player = player_get(player_index);
-		if (player->unit_index != NONE &&
-			!scenario_trigger_volume_test_object(
+		if (player->unit_index == NONE ||
+			scenario_trigger_volume_test_object(
 				trigger_volume_index,
 				player->unit_index))
 		{
-			if (first_unit_index != NONE && network_coop_active())
-			{
-				player_teleport(player_index, first_unit_index, &object_get(first_unit_index)->object.position);
-				continue;
-			}
-			hs_object_orient(
-				player->unit_index,
-				cutscene_flag_index,
-				TRUE,
-				TRUE);
-			first_unit_index = player->unit_index;
+			continue;
 		}
+		if (coop && !flag)
+			continue;
+		if (flag)
+		{
+			boolean here = FALSE;
+			real_point3d origin;
+
+			if (arrived_count == 0)
+				hs_object_orient(player->unit_index, cutscene_flag_index, TRUE, TRUE);
+			here = coop_scripts_unit_near(player->unit_index, &flag->position) &&
+				!player_position_switches_bsp(object_get_origin(player->unit_index, &origin));
+			if (!here)
+				here = coop_scripts_arrive_at(player_index, &flag->position, arrived, arrived_count);
+			if (here && arrived_count < NUMBEROF(arrived))
+				arrived[arrived_count++] = player->unit_index;
+			continue;
+		}
+		hs_object_orient(
+			player->unit_index,
+			cutscene_flag_index,
+			TRUE,
+			TRUE);
 	}
 
 	return;

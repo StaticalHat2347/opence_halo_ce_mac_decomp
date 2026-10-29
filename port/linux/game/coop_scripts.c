@@ -20,7 +20,9 @@ fires for whoever walks into it, and what it starts is sent to the clients
   player0 and player1 (the first two in the players list), to put them in
   a Pelican, take them out of it, stage them for a cutscene or give them a
   starting profile. Everyone past the second would be left out, so they
-  follow player0: wherever the scripts put player0, they go too.
+  follow player0: wherever the scripts put player0, they go too. A crowd
+  does not fit on one spot (Truth and Reconciliation's grav lift leaves
+  them on the beach), so they spread around that flag.
 */
 
 /* ---------- headers */
@@ -30,8 +32,10 @@ fires for whoever walks into it, and what it starts is sent to the clients
 #include "game/game.h"
 #include "game/players.h"
 #include "hs/object_lists.h"
+#include "math/real_math.h"
 #include "objects/objects.h"
 #include "objects/object_types.h"
+#include "physics/collisions.h"
 #include "scenario/scenario.h"
 #include "units/bipeds.h"
 #include "units/units.h"
@@ -99,33 +103,11 @@ boolean coop_scripts_any_player_will_do(
 	return any;
 }
 
-void coop_scripts_gather_in_volume(
-	short trigger_volume_index,
+boolean coop_scripts_empty_player_list(
 	long object_list_index)
 {
-	long reference_index;
-	long object_index;
-	long inside_index = NONE;
-
-	for (object_index = object_list_get_first(object_list_index, &reference_index);
-		object_index != NONE && inside_index == NONE;
-		object_index = object_list_get_next(object_list_index, &reference_index))
-	{
-		if (scenario_trigger_volume_test_object(trigger_volume_index, object_index))
-			inside_index = object_index;
-	}
-	if (inside_index == NONE)
-		return;
-	for (object_index = object_list_get_first(object_list_index, &reference_index);
-		object_index != NONE;
-		object_index = object_list_get_next(object_list_index, &reference_index))
-	{
-		if (!scenario_trigger_volume_test_object(trigger_volume_index, object_index))
-		{
-			player_teleport(player_index_from_unit_index(object_index), inside_index,
-				&object_get(inside_index)->object.bounding_sphere_center);
-		}
-	}
+	return coop_scripts_host() && (object_list_index == NONE ||
+		(object_list_is_players(object_list_index) && object_list_count(object_list_index) == 0));
 }
 
 /* the units of the players following player0, if `unit_index` is
@@ -137,37 +119,286 @@ static short players_following(
 {
 	struct data_iterator iterator;
 	struct player_datum *player;
-	short position = 0;
+	long players[HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
+	short player_count = 0;
+	short position;
 	short count = 0;
 
 	if (unit_index == NONE || !coop_scripts_host())
 		return 0;
-	/* (in the order (players) lists them: player0 is the first with a unit) */
+	/* hs_players adds each unit to the head of a reference list. Its
+	player0 is the LAST live unit in datum order, not the first. Keep that
+	same order here, including gaps left by dead or disconnected players. */
 	data_iterator_new(&iterator, player_data);
 	while ((player = data_iterator_next(&iterator)) != NULL)
 	{
-		if (player->unit_index == NONE)
-			continue;
-		if (position == 0 && player->unit_index != unit_index)
-			return 0;
-		if (position >= NAMED_PLAYERS && count < maximum_count)
-			unit_indices[count++] = player->unit_index;
-		position++;
+		if (player->unit_index != NONE && player_count < NUMBEROF(players))
+			players[player_count++] = player->unit_index;
+	}
+	if (player_count == 0 || players[player_count - 1] != unit_index)
+		return 0;
+	for (position = player_count - NAMED_PLAYERS - 1;
+		position >= 0 && count < maximum_count;
+		position--)
+	{
+		unit_indices[count++] = players[position];
 	}
 	return count;
 }
 
-void coop_scripts_teleport_followers(
-	long unit_index)
+/* Clear structure between the two points at chest height, so a spot around
+a corner or through a wall is not used. The floor is below the line. */
+static boolean line_of_sight_clear(
+	real_point3d const *from,
+	real_point3d const *to)
 {
-	long followers[HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
-	short count = players_following(unit_index, followers, NUMBEROF(followers));
+	real_point3d raised_from;
+	real_point3d raised_to;
+	struct collision_result collision;
+
+	if (distance_squared3d(from, to) < 0.25f)
+		return TRUE;
+	raised_from = *from;
+	raised_to = *to;
+	raised_from.z += 0.5f;
+	raised_to.z += 0.5f;
+	return !collision_test_line(
+		FLAG(_collision_test_front_facing_surfaces_bit) |
+			FLAG(_collision_test_ignore_invisible_surfaces_bit) |
+			FLAG(_collision_test_structure_bit),
+		&raised_from,
+		&raised_to,
+		NONE,
+		&collision);
+}
+
+/* Facing to copy: an arrived player who is on foot. A vehicle as the source
+would search around the vehicle and ignore the point. */
+static long facing_unit(
+	long const *arrived_unit_indices,
+	short arrived_count)
+{
 	short index;
 
+	for (index = 0; index < arrived_count; index++)
+	{
+		if (object_get_ultimate_parent(arrived_unit_indices[index]) == arrived_unit_indices[index])
+			return arrived_unit_indices[index];
+	}
+
+	return NONE;
+}
+
+static boolean teleport_to(
+	long player_index,
+	long face_unit,
+	real_point3d const *point,
+	boolean stack)
+{
+	boolean arrived;
+
+	if (stack)
+		biped_fix_ignore_players(TRUE);
+	arrived = player_teleport(player_index, face_unit, point);
+	if (stack)
+		biped_fix_ignore_players(FALSE);
+
+	return arrived;
+}
+
+/* A placement may fail after moving the unit, or find free ground outside
+this volume. Restore that unit before retrying; never move the loaded BSP.
+The second attempt uses the same crowd fallback as scripted teleports. */
+static void gather_player_in_volume(
+	short trigger_volume_index,
+	long unit_index,
+	long anchor_index,
+	real_point3d const *destination)
+{
+	long player_index = player_index_from_unit_index(unit_index);
+	real_point3d original;
+	real_point3d placed;
+	short attempt;
+
+	if (player_index == NONE)
+		return;
+	object_get_origin(unit_index, &original);
+	for (attempt = 0; attempt < 2; attempt++)
+	{
+		boolean arrived = teleport_to(player_index, anchor_index, destination, attempt != 0);
+
+		if (arrived && scenario_trigger_volume_test_object(trigger_volume_index, unit_index) &&
+			!player_position_switches_bsp(object_get_origin(unit_index, &placed)))
+		{
+			return;
+		}
+		/* This was the unit's valid position at entry, on the same tick. */
+		object_set_position(unit_index, &original, NULL, NULL);
+	}
+}
+
+void coop_scripts_gather_in_volume(
+	short trigger_volume_index,
+	long object_list_index)
+{
+	long reference_index;
+	long object_index;
+	long inside_index = NONE;
+	real_point3d destination;
+
+	if (!coop_scripts_host())
+		return;
+	for (object_index = object_list_get_first(object_list_index, &reference_index);
+		object_index != NONE;
+		object_index = object_list_get_next(object_list_index, &reference_index))
+	{
+		if (scenario_trigger_volume_test_object(trigger_volume_index, object_index) &&
+			!player_position_switches_bsp(object_get_origin(object_index, &destination)))
+		{
+			inside_index = object_index;
+			break;
+		}
+	}
+	if (inside_index == NONE)
+		return;
+	for (object_index = object_list_get_first(object_list_index, &reference_index);
+		object_index != NONE;
+		object_index = object_list_get_next(object_list_index, &reference_index))
+	{
+		if (!scenario_trigger_volume_test_object(trigger_volume_index, object_index))
+			gather_player_in_volume(trigger_volume_index, object_index, inside_index, &destination);
+	}
+}
+
+boolean coop_scripts_unit_near(
+	long unit_index,
+	real_point3d const *destination)
+{
+	real_point3d origin;
+
+	if (unit_index == NONE || !destination)
+		return FALSE;
+
+	/* (in the world: a seated unit's position is its seat's, in the vehicle) */
+	return distance_squared3d(destination, object_get_origin(unit_index, &origin)) <=
+		COOP_SCRIPT_TELEPORT_RADIUS * COOP_SCRIPT_TELEPORT_RADIUS;
+}
+
+boolean coop_scripts_arrive_at(
+	long player_index,
+	real_point3d const *destination,
+	long const *arrived_unit_indices,
+	short arrived_count)
+{
+	static real const ring_radius[] = { 1.5f, 3.f, 4.5f, 6.f, 7.5f };
+	static real const ring_direction[][2] =
+	{
+		{ 1.f, 0.f },
+		{ 0.70710677f, 0.70710677f },
+		{ 0.f, 1.f },
+		{ -0.70710677f, 0.70710677f },
+		{ -1.f, 0.f },
+		{ -0.70710677f, -0.70710677f },
+		{ 0.f, -1.f },
+		{ 0.70710677f, -0.70710677f }
+	};
+	struct player_datum *player;
+	long face_unit;
+	long unit_index;
+	real_point3d original;
+	short index;
+	short radius_index;
+	short direction_index;
+	boolean stacked;
+
+	if (!coop_scripts_host() || player_index == NONE || !destination)
+		return FALSE;
+	player = player_get(player_index);
+	unit_index = player->unit_index;
+	if (unit_index == NONE)
+		return FALSE;
+	object_get_origin(unit_index, &original);
+	face_unit = facing_unit(arrived_unit_indices, arrived_count);
+	if (!player_position_switches_bsp(destination) && teleport_to(player_index, face_unit, destination, FALSE))
+		return TRUE;
+	for (index = 0; index < arrived_count; index++)
+	{
+		real_point3d spot;
+
+		object_get_origin(arrived_unit_indices[index], &spot);
+		if (!coop_scripts_unit_near(arrived_unit_indices[index], destination) ||
+			!line_of_sight_clear(destination, &spot) ||
+			player_position_switches_bsp(&spot))
+		{
+			continue;
+		}
+		if (teleport_to(player_index, face_unit, &spot, FALSE))
+			return TRUE;
+	}
+	for (radius_index = 0; radius_index < (short)NUMBEROF(ring_radius); radius_index++)
+	{
+		for (direction_index = 0; direction_index < (short)NUMBEROF(ring_direction); direction_index++)
+		{
+			real_point3d spot;
+
+			spot.x = destination->x + ring_radius[radius_index] * ring_direction[direction_index][0];
+			spot.y = destination->y + ring_radius[radius_index] * ring_direction[direction_index][1];
+			spot.z = destination->z;
+			if (!line_of_sight_clear(destination, &spot) || player_position_switches_bsp(&spot))
+				continue;
+			if (teleport_to(player_index, face_unit, &spot, FALSE))
+				return TRUE;
+		}
+	}
+	/* Still outside: stand on the flag itself, sharing it with whoever got
+	there. The next ticks ease the overlap apart inside the room. A refused
+	spot can already have moved them, so a failure here steps back. */
+	stacked = !player_position_switches_bsp(destination) && teleport_to(player_index, face_unit, destination, TRUE);
+	if (!stacked)
+		teleport_to(player_index, NONE, &original, FALSE);
+
+	return stacked;
+}
+
+void coop_scripts_teleport_followers(
+	long unit_index,
+	real_point3d const *destination)
+{
+	long followers[HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
+	long arrived[HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
+	short count = players_following(unit_index, followers, NUMBEROF(followers));
+	short arrived_count = 0;
+	short index;
+	long player0_index;
+	real_point3d origin;
+
+	if (count == 0 || !destination)
+		return;
+	/* player0's own teleport only searches an arm's length. If that missed,
+	try the wider search before anyone stands beside them. A spot inside a
+	BSP switch does not count: the next tick would switch the level. */
+	player0_index = player_index_from_unit_index(unit_index);
+	if (coop_scripts_unit_near(unit_index, destination) &&
+		!player_position_switches_bsp(object_get_origin(unit_index, &origin)))
+	{
+		arrived[arrived_count++] = unit_index;
+	}
+	else if (player0_index != NONE &&
+		coop_scripts_arrive_at(player0_index, destination, arrived, arrived_count) &&
+		arrived_count < NUMBEROF(arrived))
+	{
+		arrived[arrived_count++] = unit_index;
+	}
 	for (index = 0; index < count; index++)
 	{
-		player_teleport(player_index_from_unit_index(followers[index]), unit_index,
-			&object_get(unit_index)->object.position);
+		long player_index = player_index_from_unit_index(followers[index]);
+
+		if (player_index != NONE &&
+			coop_scripts_arrive_at(player_index, destination, arrived, arrived_count) &&
+			arrived_count < NUMBEROF(arrived))
+		{
+			arrived[arrived_count++] = followers[index];
+		}
 	}
 }
 

@@ -391,6 +391,8 @@ symbols in this file:
 #include "networking/network_messages.h"
 #include "networking/network_server_manager.h"
 #include "text/unicode.h"
+#include "map_share.h" /* port: port/linux/game/map_share.c */
+#include "custom_edition_cache.h" /* port: port/linux/game/custom_edition_cache.c */
 
 /* ---------- constants */
 
@@ -597,6 +599,7 @@ struct message_client_ping
 
 /* port/linux/src/p2p.c's */
 void p2p_hardware_id(char *hex, int size);
+void p2p_join_refused(int rejection_code);
 
 struct message_client_join_game_request
 {
@@ -781,6 +784,13 @@ progress, 16 bits of it (0 for a game starting); and whether the first game
 update is to bring the host's time (at every start) */
 long network_game_client_late_join_time;
 static boolean network_game_client_late_join_clock_pending;
+/* port: the host said to start while this machine was still downloading the
+map (map sharing): started once the map is there, network_game_client_idle_pregame,
+if the game is still the one put off (its map, and the games played before
+it: the host may end it, or go on to another, meanwhile) */
+static boolean network_game_client_start_pending;
+static char network_game_client_start_pending_map[0x80];
+static long network_game_client_start_pending_games;
 
 /* whether the automated tests' join has told the player why a host cannot
 be joined (network_game_client_join_first_available_game) */
@@ -799,12 +809,14 @@ static unsigned long network_game_client_link_down_time;
 static unsigned long network_game_client_link_checked_time;
 static boolean network_game_client_link_down;
 
-/* each advertised game's host's network version and netcode, by its place
-in the client's available_games (HALO_PORT_NETWORK_VERSION) */
+/* each advertised game's host's network version and netcode, and the game's
+kind (game_modes_kind), by its place in the client's available_games
+(HALO_PORT_NETWORK_VERSION) */
 static struct
 {
 	word version;
 	byte flags;
+	byte kind;
 } network_game_client_advertised_versions[MAXIMUM_NETWORK_ADVERTISED_GAMES];
 
 struct network_game_client network_game_client_dont_use_directly;
@@ -1017,6 +1029,8 @@ boolean network_game_client_switch_to_pregame(
 		client->state = _network_game_client_state_pregame;
 		network_game_client_late_join_time = 0;
 		network_game_client_late_join_clock_pending = FALSE;
+		/* port: a start put off is not this game's */
+		network_game_client_start_pending = FALSE;
 		network_event("switching to pregame");
 		network_game_reset_to_pregame_ui();
 		network_connection_keep_alive(client->connection);
@@ -1491,6 +1505,12 @@ boolean network_game_client_add_player(
 		0x530,
 		client && (local_player_index>=0) && (local_player_index<MAXIMUM_NUMBER_OF_LOCAL_PLAYERS));
 
+	/* port: not until the host's settings name the game's map, and a game
+	in progress whose map is being downloaded not until it is (map sharing:
+	port/linux/game/map_share.c); asked again each frame */
+	if (map_share_holds_players())
+		return TRUE;
+
 	/* port: the pregame screen asks each frame until the host's settings
 	have the player: once every half second, not each frame (the host
 	refused and logged each repeat) */
@@ -1642,6 +1662,26 @@ boolean network_game_client_handle_game_update(
 	}
 
 	return TRUE;
+}
+
+/* port: not while the map is still being downloaded (map sharing): loaded
+then, it is not there (the damaged disc error, for good). The game starts
+once it is there (network_game_client_idle_pregame). A host of this version
+starts no machine before its download is done; one of before may. */
+boolean network_game_client_begin_game(
+	struct network_game_client *client)
+{
+	if (client && map_share_downloading(client->game.map.name))
+	{
+		network_game_client_start_pending = TRUE;
+		csstrncpy(network_game_client_start_pending_map, client->game.map.name,
+			sizeof(network_game_client_start_pending_map) - 1);
+		network_game_client_start_pending_map[sizeof(network_game_client_start_pending_map) - 1] = 0;
+		network_game_client_start_pending_games = client->game.number_of_games_played;
+		network_event("the host started the game while its map is being downloaded: joining it once the map is there");
+		return TRUE;
+	}
+	return network_game_client_game_has_started(client);
 }
 
 boolean network_game_client_game_has_started(
@@ -1807,7 +1847,11 @@ boolean network_game_client_remove_player(
 				}
 			}
 
-			if (network_player_index == MAXIMUM_NUMBER_OF_PLAYERS)
+			/* port: a dedicated server's own machine never has a player
+			(port/linux/game/server_director.c): it leaves only when a player
+			of its own goes, which none is */
+			if (network_player_index == MAXIMUM_NUMBER_OF_PLAYERS &&
+				(!halo_server_mode() || player->machine_index == client->machine_index))
 			{
 				network_game_client_all_local_players_have_quit();
 				network_event("no local players remain in the game, exiting the game now");
@@ -2227,6 +2271,8 @@ void network_game_client_reset(
 	client->seconds_to_game_start = NONE;
 	network_game_client_late_join_time = 0;
 	network_game_client_late_join_clock_pending = FALSE;
+	/* port: no start put off */
+	network_game_client_start_pending = FALSE;
 	network_game_client_incompatibility_told = FALSE;
 	csmemset(network_game_client_add_player_requested, 0, sizeof(network_game_client_add_player_requested));
 
@@ -2317,6 +2363,8 @@ void network_game_client_rejected_by_game(
 		"unable to join game: reason= #%d/%s",
 		rejection_code,
 		reason);
+	/* port: why, for the server browser's line (p2p_join_progress) */
+	p2p_join_refused(rejection_code);
 	/* port: the join went to the pregame screen at once (and a machine
 	refused a game in progress, network_game_server_refuse_late_joiner, is in
 	it): with no game behind it, it is left for the main menu, which says
@@ -2341,7 +2389,8 @@ static boolean network_game_client_map_name_is_valid(
 {
 	/* (a scenario's tag path, of which the cache takes the name after the
 	last backslash: letters, digits and a few more, none that a path reads
-	otherwise) */
+	otherwise; the [ ] ( ) + that Custom Edition maps' names use, as in
+	[H2]_Lockout, too) */
 	char const *character;
 	char const *leaf;
 
@@ -2351,7 +2400,8 @@ static boolean network_game_client_map_name_is_valid(
 	{
 		if (!((*character >= 'a' && *character <= 'z') || (*character >= 'A' && *character <= 'Z') ||
 			(*character >= '0' && *character <= '9') || *character == '_' || *character == '-' ||
-			*character == '.' || *character == ' ' || *character == '\\'))
+			*character == '.' || *character == ' ' || *character == '\\' ||
+			*character == '[' || *character == ']' || *character == '(' || *character == ')' || *character == '+'))
 		{
 			return FALSE;
 		}
@@ -2360,6 +2410,22 @@ static boolean network_game_client_map_name_is_valid(
 		return FALSE;
 	leaf = strrchr(map_name, '\\');
 	leaf = leaf ? leaf + 1 : map_name;
+	/* port: and not one of Windows's devices (con, nul, com1...), whatever
+	follows it: maps\com1.map opens the serial port there */
+	{
+		static char const *const devices[] = { "con", "prn", "aux", "nul", "com", "lpt" };
+		long stem = (long)strcspn(leaf, ". ");
+		short device;
+
+		for (device = 0; device < (short)NUMBEROF(devices); device++)
+		{
+			if (!_strnicmp(leaf, devices[device], 3) &&
+				((device < 4 && stem == 3) || (device >= 4 && stem == 4 && leaf[3] >= '0' && leaf[3] <= '9')))
+			{
+				return FALSE;
+			}
+		}
+	}
 	return *leaf && leaf[strspn(leaf, ". ")] != 0;
 }
 
@@ -2479,6 +2545,8 @@ static boolean add_advertised_game(
 				(advertisement->__unknown5A[HALO_PORT_ADVERTISED_VERSION_OFFSET + 1] << 8));
 			network_game_client_advertised_versions[game_index].flags =
 				advertisement->__unknown5A[HALO_PORT_ADVERTISED_FLAGS_OFFSET];
+			network_game_client_advertised_versions[game_index].kind =
+				advertisement->__unknown5A[HALO_PORT_ADVERTISED_KIND_OFFSET];
 		}
 
 		if (advertisement->game_name[0] != L'\0')
@@ -2889,6 +2957,26 @@ static boolean network_game_client_idle_pregame(
 			{
 				network_event("network_game_client_process_incoming_messages() failed in network_game_client_idle_pregame()");
 			}
+			/* port: a start put off while the map was downloaded (map
+			sharing), once the download is over: the game loaded if the map
+			is there (a failed download leaves the game: map_share.c) */
+			else if (network_game_client_start_pending && client->state == _network_game_client_state_pregame &&
+				!map_share_downloading(client->game.map.name))
+			{
+				network_game_client_start_pending = FALSE;
+				if (csstrcmp(client->game.map.name, network_game_client_start_pending_map) ||
+					client->game.number_of_games_played != network_game_client_start_pending_games)
+				{
+					network_event("the game put off is over: waiting for the host's next start");
+				}
+				else if (!custom_edition_level_name(client->game.map.name) ||
+					custom_edition_cache_playable(client->game.map.name))
+				{
+					network_event("the map is downloaded: joining the game the host started");
+					if (!network_game_client_game_has_started(client))
+						network_event("network_game_client_game_has_started() failed");
+				}
+			}
 		}
 		else
 		{
@@ -3072,7 +3160,6 @@ boolean network_game_client_advertised_game_compatible(
 	unsigned int ours = HALO_PORT_NETWORK_VERSION;
 	unsigned int theirs;
 	boolean distributed;
-	char message[400];
 
 	if (game_index < 0 || game_index >= MAXIMUM_NETWORK_ADVERTISED_GAMES)
 		return FALSE;
@@ -3084,6 +3171,20 @@ boolean network_game_client_advertised_game_compatible(
 		network_event("joining a host of network version %u", theirs);
 		return TRUE;
 	}
+	if (tell)
+		network_game_client_tell_version(theirs, distributed);
+	return FALSE;
+}
+
+/* port: the player told why a host of this network version (and netcode)
+cannot be joined: an advertised game's, or a server browser's row's */
+void network_game_client_tell_version(
+	unsigned int theirs,
+	boolean distributed)
+{
+	unsigned int ours = HALO_PORT_NETWORK_VERSION;
+	char message[400];
+
 	if (theirs == ours)
 	{
 		csprintf(message,
@@ -3106,13 +3207,9 @@ boolean network_game_client_advertised_game_compatible(
 			"Ask the host to update the game.",
 			ours, theirs);
 	}
-	if (tell)
-	{
-		network_event("not joining a host of network version %u%s (this machine's is %u)", theirs,
-			distributed ? "" : " with the lockstep netcode", ours);
-		platform_show_message("Halo: cannot join this game", message);
-	}
-	return FALSE;
+	network_event("not joining a host of network version %u%s (this machine's is %u)", theirs,
+		distributed ? "" : " with the lockstep netcode", ours);
+	platform_show_message("Halo: cannot join this game", message);
 }
 
 /* port: whether the advertised game is under way (HALO_PORT_ADVERTISED_IN_PROGRESS_FLAG),
@@ -3125,6 +3222,61 @@ boolean network_game_client_advertised_game_in_progress(
 
 	return game_index >= 0 && game_index < MAXIMUM_NETWORK_ADVERTISED_GAMES &&
 		(network_game_client_advertised_versions[game_index].flags & HALO_PORT_ADVERTISED_IN_PROGRESS_FLAG) != 0;
+}
+
+/* port: whether the advertised game's host is a dedicated server
+(HALO_PORT_ADVERTISED_DEDICATED_FLAG), for the lobby's line */
+boolean network_game_client_advertised_game_dedicated(
+	struct network_game_client *client,
+	struct network_advertised_game const *game)
+{
+	long game_index = client ? game - client->available_games : NONE;
+
+	return game_index >= 0 && game_index < MAXIMUM_NETWORK_ADVERTISED_GAMES &&
+		(network_game_client_advertised_versions[game_index].flags & HALO_PORT_ADVERTISED_DEDICATED_FLAG) != 0;
+}
+
+/* port: the client's index'th advertised game, as a probe tells it (halo
+--probe: port/linux/game/network_test.c) */
+boolean network_game_client_port_advertised_game_summary(
+	long index,
+	struct network_advertised_game_summary *summary)
+{
+	struct network_game_client *client = global_network_game_client_get();
+	struct network_advertised_game *game;
+
+	if (!client || index < 0 || index >= MAXIMUM_NETWORK_ADVERTISED_GAMES)
+		return FALSE;
+	game = &client->available_games[index];
+	if (!network_game_client_advertised_game_is_valid(game))
+		return FALSE;
+	csmemset(summary, 0, sizeof(*summary));
+	csmemcpy(summary->name, game->game_name, sizeof(summary->name));
+	summary->name[NUMBEROF(summary->name) - 1] = 0;
+	csmemcpy(summary->map_name, game->map.name, sizeof(summary->map_name));
+	summary->map_name[sizeof(summary->map_name) - 1] = 0;
+	summary->engine_type = game->engine_type;
+	summary->player_count = (short)game->player_count;
+	summary->maximum_player_count = game->maximum_player_count;
+	summary->open = game->open;
+	summary->has_teams = game->has_teams;
+	summary->in_progress = network_game_client_advertised_game_in_progress(client, game);
+	summary->dedicated = network_game_client_advertised_game_dedicated(client, game);
+	summary->version = network_game_client_advertised_versions[index].version;
+	summary->kind = network_game_client_advertised_versions[index].kind;
+	return TRUE;
+}
+
+/* port: the advertised game's kind (an OpenCE gametype's mode, and Hardcore:
+port/linux/game/game_modes.h), for the server browser's name of it */
+byte network_game_client_advertised_game_kind(
+	struct network_game_client *client,
+	struct network_advertised_game const *game)
+{
+	long game_index = client ? game - client->available_games : NONE;
+
+	return game_index >= 0 && game_index < MAXIMUM_NETWORK_ADVERTISED_GAMES ?
+		network_game_client_advertised_versions[game_index].kind : 0;
 }
 
 boolean network_game_client_join_first_available_game(

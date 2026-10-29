@@ -298,6 +298,20 @@ int host_sdl_rumble_gamepad(uint32_t gamepad, uint32_t low, uint32_t high, uint3
 	return object ? SDL_RumbleGamepad(object, (Uint16)low, (Uint16)high, milliseconds) : 0;
 }
 
+/* The event thread closes a controller when it is removed. */
+void host_sdl_close_gamepad(uint32_t gamepad)
+{
+	SDL_Gamepad *object = handle_get(gamepad, _handle_gamepad);
+
+	if (!object)
+		return;
+	pthread_mutex_lock(&handle_lock);
+	handles[gamepad].type = _handle_free;
+	handles[gamepad].object = NULL;
+	pthread_mutex_unlock(&handle_lock);
+	SDL_CloseGamepad(object);
+}
+
 void host_sdl_scancode_name(int32_t scancode, char *buffer, uint32_t size)
 {
     SDL_strlcpy(buffer, SDL_GetScancodeName((SDL_Scancode)scancode), size);
@@ -748,7 +762,7 @@ int host_sdl_render_present(uint32_t renderer)
 The guest's SDL_MessageBoxData holds 32-bit pointers; it passes the parts
 instead: the button texts one after another, each NUL-terminated. */
 
-int host_sdl_show_message_box(uint32_t flags, const char *title, const char *message, int count,
+int host_macos_sdl_show_message_box(uint32_t flags, const char *title, const char *message, int count,
 	const int32_t *button_flags, const int32_t *button_ids, const char *texts, int32_t *chosen)
 {
 	SDL_MessageBoxButtonData buttons[8];

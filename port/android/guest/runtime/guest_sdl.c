@@ -95,6 +95,33 @@ bool SDL_ShowSimpleMessageBox(SDL_MessageBoxFlags flags, const char *title, cons
 	return host_sdl_show_simple_message_box((unsigned int)flags, title, message) != 0;
 }
 
+/* (up to three buttons, their ids those of the guest's) */
+#ifndef HALO_MACOS
+bool SDL_ShowMessageBox(const SDL_MessageBoxData *data, int *buttonid)
+{
+	const char *labels[3] = { NULL, NULL, NULL };
+	int default_index = -1;
+	int index;
+	int chosen;
+
+	if (!data || data->numbuttons < 1 || data->numbuttons > 3)
+		return false;
+	for (index = 0; index < data->numbuttons; index++)
+	{
+		labels[index] = data->buttons[index].text;
+		if (data->buttons[index].flags & SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT)
+			default_index = index;
+	}
+	chosen = host_sdl_show_message_box((unsigned int)data->flags, data->title, data->message, default_index,
+		labels[0], labels[1], labels[2]);
+	if (chosen < 0 || chosen >= data->numbuttons)
+		return false;
+	if (buttonid)
+		*buttonid = data->buttons[chosen].buttonID;
+	return true;
+}
+#endif
+
 void SDL_Delay(Uint32 milliseconds)
 {
 	struct timespec duration;
@@ -214,6 +241,11 @@ SDL_GamepadType SDL_GetGamepadType(SDL_Gamepad *gamepad)
 bool SDL_RumbleGamepad(SDL_Gamepad *gamepad, Uint16 low, Uint16 high, Uint32 milliseconds)
 {
 	return host_sdl_rumble_gamepad((unsigned int)gamepad, low, high, milliseconds) != 0;
+}
+
+void SDL_CloseGamepad(SDL_Gamepad *gamepad)
+{
+	host_sdl_close_gamepad((unsigned int)gamepad);
 }
 
 /* ---------- audio */

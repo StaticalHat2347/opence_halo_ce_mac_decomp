@@ -28,15 +28,21 @@ A multiplayer map gets them too, for its in-game pause menu's SETTINGS
 (pause_patch): there the map's tags they name that it has not (ui.map's
 pictures, sounds and screens) are none, a missing picture drawn blank, and
 no screen pauses the game (a network game's clock runs on).
+
+So does a single-player campaign's map (pause_campaign_patch), whose screens
+pause it as its pause menu does, and a network co-op game's, whose pause
+menu gets FRIENDLY FIRE too.
 */
 
 #include "cseries.h"
 #include "bitmaps/bitmap_group.h"
+#include "game/game.h"
 #include "tag_files/tag_groups.h"
 #include "text/text_group.h"
 #include "rasterizer/xbox/rasterizer_xbox_hardware_bitmaps.h"
 
 #include "halo_menus.h"
+#include "custom_edition_cache.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +57,7 @@ int platform_audio_devices(int recording, char (*names)[128], int maximum);
 
 /* the game's network server (this machine hosts: network_game_globals.c) */
 void *global_network_game_server_get(void);
+boolean network_game_is_active(void);
 
 /* cache_files.c's (port) */
 void *cache_files_tag_instances(long *count);
@@ -74,7 +81,10 @@ boolean pc_menu_frame_placement(struct bitmap_data const *bitmap, short *x, shor
 /* the multiplayer maps' widget collection, whose pause screens pause_patch
 adds to */
 #define MULTIPLAYER_COLLECTION "ui\\shell\\multiplayer"
-/* the tags pause_patch adds: two buttons and their texts */
+/* the campaign's full screen pause screen, which pause_campaign_patch adds to */
+#define CAMPAIGN_PAUSE_SCREEN "ui\\shell\\solo_game\\pause_game\\pause_game"
+/* the tags pause_patch or pause_campaign_patch adds: two buttons and their
+texts (SETTINGS, and END GAME or FRIENDLY FIRE) */
 #define PAUSE_PATCH_TAGS 4
 /* what a frame of ui.map's is drawn as in a game map, which has not got it */
 #define BLANK_PNG "ce/port/blank__0.png"
@@ -346,8 +356,7 @@ static char const *const port_function_names[] =
 	"direct ip connect go", "direct ip edit field", "network settings edit a port", "network settings defaults",
 	"load game menu delete request", "load game menu delete finish",
 	"initialize sp level list solo", "dispose sp level list", "solo level set map", "set difficulty",
-	"port setup options init", "port setup options save",
-        "port settings save", "port settings defaults", "controls binding slot",
+	"port settings save", "port settings defaults", "controls binding slot",
 	"color picker menu initialize", "color picker menu dispose", "color picker select color",
 	"player profile list initialize", "player profile list dispose", "request del player profile",
 	"final del player profile",
@@ -355,8 +364,9 @@ static char const *const port_function_names[] =
 	"mp level select", "mp profiles list initialize", "mp profiles list dispose", "mp profile set for game",
 	"port lobby preview join",
 	"port setup edit",
+	"port setup options init", "port setup options save",
 	"port map list back",
-	"port pause end game",
+	"port pause end game", "port coop friendly fire",
 	"port coop begin", "port coop player 2 list initialize", "port coop player 2",
 	"port lobby open", "port lobby add player", "port lobby join", "port lobby leave",
 	"port lobby player list initialize", "port lobby player choose",
@@ -370,11 +380,21 @@ static char const *const port_function_names[] =
 	"mp profile init indicator opts", "mp profile set ctf rules", "mp profile set koth rules",
 	"mp profile set slayer rules", "mp profile set oddball rules", "mp profile set racing rules",
 	"mp profile set player options", "mp profile set item options", "mp profile set indicator opts",
+	/* (the gametype editor's OPENCE OPTIONS: OpenCE's gametypes, game_modes.c) */
+	"mp profile init opence options", "mp profile set opence options",
 	/* (Settings' OK: the Xbox's fails when the profile has no changes, the
 	settings' screens having written theirs to config.toml) */
 	"player profile save changes",
 	/* (the server browser's password screen) */
 	"port password init", "port password edit", "port password join", "port password back",
+	/* (Gamepads' OK in a single-player campaign: pause_settings_patch) */
+	"port profile settings save",
+	/* (a new profile's screens: Settings' is then being edited, which the
+	Xbox's leaves to its own screens) */
+	"new campaign decision",
+	/* (the main menu's Mods: menu_functions.c) */
+	"port mods init", "port mods close", "port mods toggle", "port mods move up", "port mods move down",
+	"port mods save",
 };
 
 /* the PC version's game data functions that the Xbox's have not, from
@@ -396,6 +416,12 @@ static char const *const port_game_data_input_names[] =
 	/* (the profile settings' picture: the Xbox's of the button settings,
 	on Gamepad Setup's row) */
 	"port gamepad layout preview",
+	/* (the main menu's Mods) */
+	"port mods update",
+	/* (network co-op's pause menu's FRIENDLY FIRE: its text, ON or OFF) */
+	"port coop friendly fire text",
+	/* (the gametype editor's description, with OPENCE OPTIONS' row) */
+	"port playlist edit desc",
 };
 
 static struct
@@ -430,9 +456,15 @@ static struct
 	long *text_tags;
 	long *spinner_tags;
 	boolean failed;
-	/* a multiplayer map's build (the pause menu's SETTINGS): what the map
-	has not got is none, not a failure */
+	/* a game map's build (the pause menu's SETTINGS): what the map has not
+	got is none, not a failure */
 	boolean game_map;
+	/* a single-player campaign's map's, whose screens pause the game */
+	boolean campaign;
+	/* the strings taken from the Custom Edition's loc.map */
+	long map_strings;
+	/* a network co-op game's map's: its pause menu gets FRIENDLY FIRE too */
+	boolean coop;
 } build;
 
 /* ---------- private code */
@@ -687,8 +719,11 @@ static void parse_bounds(char const *text, rectangle2d *bounds, char const *file
 	}
 }
 
-/* a 'ustr' of the strings */
-static void *string_list_build(char const *const *strings, long count)
+/* a 'ustr' of the strings; each with an index in the list `map` (the
+Custom Edition's in its language, or NULL) given by maps is its string
+there */
+static void *string_list_build(char const *const *strings, long const *maps, long count,
+	struct custom_edition_string_list const *map)
 {
 	struct string_list *list = allocate(sizeof(struct string_list));
 	struct string_list_entry *entries = allocate(count * sizeof(struct string_list_entry));
@@ -701,9 +736,22 @@ static void *string_list_build(char const *const *strings, long count)
 	for (index = 0; index < count; index++)
 	{
 		long length = (long)strlen(strings[index]);
-		unsigned short *characters = allocate((length * 2 + 2) * sizeof(unsigned short));
+		unsigned short *characters;
 		long written;
 
+		if (map && maps[index] != HALO_MENU_NONE && maps[index] < map->count)
+		{
+			length = map->lengths[maps[index]];
+			characters = allocate(length * sizeof(unsigned short));
+			if (!characters)
+				return list;
+			memcpy(characters, map->strings[maps[index]], length * sizeof(unsigned short));
+			entries[index].string.size = length * (long)sizeof(unsigned short);
+			entries[index].string.address = characters;
+			build.map_strings++;
+			continue;
+		}
+		characters = allocate((length * 2 + 2) * sizeof(unsigned short));
 		if (!characters)
 			return list;
 		written = halo_menus_utf16(strings[index], characters, length * 2 + 2);
@@ -901,7 +949,18 @@ static void *bitmap_build(struct halo_menu_bitmap const *source, long tag_index)
 		}
 		bitmap->width = (short)width;
 		bitmap->height = (short)height;
-		menu_tags.bitmaps = realloc(menu_tags.bitmaps, (menu_tags.bitmap_count + 1) * sizeof(*menu_tags.bitmaps));
+		{
+			struct bitmap_data **bitmaps = realloc(menu_tags.bitmaps,
+				(menu_tags.bitmap_count + 1) * sizeof(*menu_tags.bitmaps));
+
+			if (!bitmaps)
+			{
+				rasterizer_bitmap_delete(bitmap);
+				problem(source->file, source->line, "out of memory for the bitmaps of", source->name);
+				return group;
+			}
+			menu_tags.bitmaps = bitmaps;
+		}
 		menu_tags.bitmaps[menu_tags.bitmap_count++] = bitmap;
 		/* (none without a renderer: debug.null_renderer) */
 		if (bitmap->hardware_format)
@@ -1031,8 +1090,15 @@ static void handler_build(struct ui_widget_event_handler_reference *handler, str
 static void setting_add(struct halo_menu_widget const *source, long definition_index)
 {
 	struct pc_menu_setting *setting;
+	struct pc_menu_setting *settings = realloc(menu_tags.settings,
+		(menu_tags.setting_count + 1) * sizeof(*menu_tags.settings));
 
-	menu_tags.settings = realloc(menu_tags.settings, (menu_tags.setting_count + 1) * sizeof(*menu_tags.settings));
+	if (!settings)
+	{
+		problem(source->file, source->line, "out of memory for the settings of", source->name);
+		return;
+	}
+	menu_tags.settings = settings;
 	setting = &menu_tags.settings[menu_tags.setting_count++];
 	memset(setting, 0, sizeof(*setting));
 	setting->definition_index = definition_index;
@@ -1087,7 +1153,7 @@ static void *widget_build(long widget_index)
 	definition->flags = flags_parse(source->flags, widget_flag_names, NUMBEROF(widget_flag_names),
 		source->file, source->line);
 	/* (in a network game the clock runs on) */
-	if (build.game_map)
+	if (build.game_map && !build.campaign)
 		definition->flags &= ~FLAG(1); /* pause_game */
 	definition->milliseconds_to_auto_close = source->auto_close;
 	definition->auto_close_fade_time = source->auto_close_fade;
@@ -1494,23 +1560,38 @@ static long pause_quit_button(struct ui_widget_definition const *list, long quit
 
 /* a button like the model (its look), its own text, each of the model's
 events (its A and Start) running the function and opening the widget (if
-not NONE) */
+not NONE); with other_text, a second text, which the game data input (input)
+chooses between */
 static void *pause_button(struct cache_file_tag_instance *instances, struct ui_widget_definition const *model,
-	char const *name, char const *text, long function, long widget_tag)
+	char const *name, char const *text, long function, long widget_tag, char const *other_text, long input)
 {
 	struct ui_widget_definition *button = allocate(sizeof(*button));
 	struct ui_widget_event_handler_reference *handlers =
 		allocate(model->event_handlers.count * sizeof(struct ui_widget_event_handler_reference));
 	long text_tag = next_tag(), handler;
+	char const *texts[2];
 
 	if (!button || !handlers)
 		return NULL;
 	memcpy(button, model, sizeof(*button));
-	instance_set(instances, UNICODE_STRING_LIST_TAG, text_tag, name, " text", string_list_build(&text, 1));
+	texts[0] = text;
+	texts[1] = other_text;
+	instance_set(instances, UNICODE_STRING_LIST_TAG, text_tag, name, " text",
+		string_list_build(texts, NULL, other_text ? 2 : 1, NULL));
 	reference_set(&button->text_label_string_list, UNICODE_STRING_LIST_TAG, text_tag);
 	button->string_list_index = 0;
 	button->game_data_inputs.count = 0;
 	button->game_data_inputs.address = NULL;
+	if (other_text)
+	{
+		struct ui_widget_game_data_input_reference *inputs = allocate(sizeof(*inputs));
+
+		if (!inputs)
+			return NULL;
+		inputs->function = (short)input;
+		button->game_data_inputs.count = 1;
+		button->game_data_inputs.address = inputs;
+	}
 	/* (the game's memcpy asserts on a NULL source, even for nothing) */
 	if (model->event_handlers.count)
 		memcpy(handlers, model->event_handlers.address, model->event_handlers.count * sizeof(*handlers));
@@ -1530,36 +1611,42 @@ static void *pause_button(struct cache_file_tag_instance *instances, struct ui_w
 	return button;
 }
 
-/* the list's buttons: SETTINGS (and the host's END GAME) put before LEAVE
-GAME (quit); returns how many were added */
+/* the list's buttons: SETTINGS, and the host's END GAME or network co-op's
+FRIENDLY FIRE (whose text says the machine's choice: menu_functions.c), put
+before LEAVE GAME or REVERT TO SAVED (quit); returns how many were added, and
+how much taller the list grew for them (growth) */
 static long pause_list_patch(struct cache_file_tag_instance *instances, struct ui_widget_definition *list, long quit,
-	boolean host)
+	boolean host, short *growth)
 {
 	struct ui_widget_child_reference *children = list->child_widgets.address;
-	long count = list->child_widgets.count, added = host ? 2 : 1, child;
+	long count = list->child_widgets.count, added = host || build.coop ? 2 : 1, child;
 	struct ui_widget_child_reference *grown = allocate((count + added) * sizeof(struct ui_widget_child_reference));
 	struct ui_widget_definition const *model = tag_get(UI_WIDGET_DEFINITION_TAG, children[quit].widget_tag.index);
 	long settings_widget = widget_named(PAUSE_SETTINGS_SCREEN);
 	short spacing = count >= 2 ? (short)(children[count - 1].vertical_offset - children[count - 2].vertical_offset) :
 		PAUSE_BUTTON_SPACING;
+	char const *names[2];
 	void *buttons[2];
 	long tags[2];
 
 	if (!grown || settings_widget == NONE || spacing <= 0)
 		return 0;
+	names[0] = "pause/settings_button";
 	tags[0] = next_tag();
-	buttons[0] = pause_button(instances, model, "pause/settings_button", "SETTINGS",
-		function_index("profile set edit begin", "pause", 0), build.widget_tags[settings_widget]);
-	tags[1] = host ? next_tag() : NONE;
-	buttons[1] = host ? pause_button(instances, model, "pause/end_game_button", "END GAME",
-		function_index("port pause end game", "pause", 0), NONE) : NULL;
-	if (!buttons[0] || (host && !buttons[1]))
+	buttons[0] = pause_button(instances, model, names[0], "SETTINGS",
+		function_index("profile set edit begin", "pause", 0), build.widget_tags[settings_widget], NULL, NONE);
+	names[1] = build.coop ? "pause/friendly_fire_button" : "pause/end_game_button";
+	tags[1] = added > 1 ? next_tag() : NONE;
+	buttons[1] = build.coop ?
+		pause_button(instances, model, names[1], "FRIENDLY FIRE ON",
+			function_index("port coop friendly fire", "pause", 0), NONE, "FRIENDLY FIRE OFF",
+			game_data_input_index("port coop friendly fire text", "pause", 0)) :
+		host ? pause_button(instances, model, names[1], "END GAME",
+			function_index("port pause end game", "pause", 0), NONE, NULL, NONE) : NULL;
+	if (!buttons[0] || (added > 1 && !buttons[1]))
 		return 0;
 	for (child = 0; child < added; child++)
-	{
-		instance_set(instances, UI_WIDGET_DEFINITION_TAG, tags[child],
-			child ? "pause/end_game_button" : "pause/settings_button", "", buttons[child]);
-	}
+		instance_set(instances, UI_WIDGET_DEFINITION_TAG, tags[child], names[child], "", buttons[child]);
 	if (quit)
 		memcpy(grown, children, quit * sizeof(*grown));
 	for (child = 0; child < added; child++)
@@ -1575,8 +1662,25 @@ static long pause_list_patch(struct cache_file_tag_instance *instances, struct u
 	}
 	list->child_widgets.address = grown;
 	list->child_widgets.count = count + added;
-	/* (the list draws within its bounds) */
-	list->bounds.y1 = (short)(list->bounds.y1 + added * spacing);
+	/* (a list with room for them, Halo PC's of five rows that Custom Edition
+	maps keep two of: the buttons centred in it; else it grows, as the
+	Xbox's of two rows does, and draws within its bounds) */
+	{
+		short room = (short)(list->bounds.y1 - list->bounds.y0);
+		short column = (short)((count + added - 1) * spacing + model->bounds.y1 - model->bounds.y0);
+
+		*growth = 0;
+		if (column <= room)
+		{
+			for (child = 0; child < count + added; child++)
+				grown[child].vertical_offset = (short)((room - column) / 2 + child * spacing);
+		}
+		else
+		{
+			*growth = (short)(added * PAUSE_BUTTON_SPACING);
+			list->bounds.y1 = (short)(list->bounds.y1 + added * spacing);
+		}
+	}
 	return added;
 }
 
@@ -1624,6 +1728,7 @@ static void pause_patch(struct cache_file_tag_instance *instances)
 	boolean host = global_network_game_server_get() != NULL;
 	struct tag_block const *screens;
 	long patched_list = NONE, added = 0, buttons = 0, screen;
+	short grow = 0;
 	boolean box_redrawn = FALSE;
 
 	if (collection == NONE || quit_function == NONE)
@@ -1635,7 +1740,7 @@ static void pause_patch(struct cache_file_tag_instance *instances)
 		struct ui_widget_definition *definition;
 		struct ui_widget_child_reference *children;
 		long child, list_child = NONE, box_child = NONE;
-		short grow, list_top;
+		short list_top;
 
 		if (screen_tag == NONE)
 			continue;
@@ -1660,7 +1765,7 @@ static void pause_patch(struct cache_file_tag_instance *instances)
 			quit = pause_quit_button(list, quit_function);
 			if (quit == NONE || patched_list != NONE)
 				continue;
-			added = pause_list_patch(instances, list, quit, host);
+			added = pause_list_patch(instances, list, quit, host, &grow);
 			if (!added)
 				return;
 			buttons = list->child_widgets.count;
@@ -1678,8 +1783,8 @@ static void pause_patch(struct cache_file_tag_instance *instances)
 			}
 		}
 		/* the stock box: taller, centred where it was, the list with it, and
-		what is below it moved down; else only what is below the list */
-		grow = (short)(added * PAUSE_BUTTON_SPACING);
+		what is below it moved down; else only what is below the list (as far
+		as the list grew) */
 		list_top = children[list_child].vertical_offset;
 		for (child = 0; child < definition->child_widgets.count; child++)
 		{
@@ -1698,18 +1803,398 @@ static void pause_patch(struct cache_file_tag_instance *instances)
 		platform_log("menus: the pause menu has SETTINGS%s", host ? " and END GAME" : "");
 }
 
+/* ---------- the campaign's pause menu
+
+Its list gets the same SETTINGS (pause_list_patch) before REVERT TO SAVED, a
+copy of it, and in network co-op FRIENDLY FIRE after SETTINGS. The rows use
+the PC version's pause menu's pitch, so a highlight sits clear of the next
+label. The prompts (B and A) stay that same gap under the last row, and the
+box beside the mission objectives grows with them. Settings there has only
+the items that work in a game (pause_settings_patch), and Gamepads' OK saves
+the profile itself. */
+
+#define PAUSE_SETTINGS_LIST "main_menu/settings_select/player_setup/player_profile_edit/profile_edit_select_list"
+#define PAUSE_SETTINGS_GAMEPADS_OK "main_menu/settings_select/player_setup/player_profile_edit/gamepad_setup/button_ok"
+#define PAUSE_NETWORK_ITEM "main_menu/settings_select/player_setup/player_profile_edit/network_settings_profile_item"
+#define PAUSE_NETWORK_SCREEN \
+	"main_menu/settings_select/player_setup/player_profile_edit/network_setup/in_game/in_game_network_settings_screen"
+
+/* Change Name's keyboard and Change Color's pictures are ui.map's, Network
+Setup is for others' games (shown in co-op: its pages, pause_network_patch),
+and About is nothing to it */
+static char const *const pause_settings_hidden_items[] =
+{
+	"main_menu/settings_select/player_setup/player_profile_edit/name_profile_item",
+	PAUSE_NETWORK_ITEM,
+	"main_menu/settings_select/player_setup/player_profile_edit/color_profile_item",
+	"main_menu/settings_select/player_setup/player_profile_edit/about_item",
+};
+
+/* the PC version's pause menu's row pitch (30 apart). The pause box's frames
+from the third, and the mission objectives' box's, are the stock 159 grown by
+the 36 that five rows at this pitch add (SETTINGS), then by the 66 that six
+add (network co-op's FRIENDLY FIRE too: tools/port_settings.py) */
+#define PAUSE_CAMPAIGN_ROW_PITCH 30
+#define PAUSE_CAMPAIGN_BOX_FRAME 2
+static short const pause_campaign_box_heights[] = { 195, 225 };
+
+/* the port box piece for one of the map's pause box pieces, else NULL */
+static char const *pause_campaign_box_bitmap(long tag_index)
+{
+	if (tag_name_ends(tag_index, "\\pausebox2_left_center"))
+		return "pause/pausebox_center";
+	if (tag_name_ends(tag_index, "\\pausebox2_left"))
+		return "pause/pausebox_left";
+	if (tag_name_ends(tag_index, "\\pausebox2_right"))
+		return "pause/pausebox_right";
+	/* The objectives' pieces carry a header, not the button-key footer. */
+	if (tag_name_ends(tag_index, "\\pausebox_right_center") || tag_name_ends(tag_index, "\\pausebox_center"))
+		return "pause/objectives_center";
+	if (tag_name_ends(tag_index, "\\pausebox_left"))
+		return "pause/objectives_left";
+	if (tag_name_ends(tag_index, "\\pausebox_right"))
+		return "pause/objectives_right";
+	return NULL;
+}
+
+/* the screen offset of the prompts under the list (B and A), else NONE */
+static short pause_campaign_prompts(struct ui_widget_definition const *screen)
+{
+	struct ui_widget_child_reference const *children = screen->child_widgets.address;
+	long child;
+
+	for (child = 0; child < screen->child_widgets.count; child++)
+	{
+		if (tag_name_ends(children[child].widget_tag.index, "\\button_key_sm") ||
+			tag_name_ends(children[child].widget_tag.index, "\\button_key"))
+		{
+			return children[child].vertical_offset;
+		}
+	}
+	return NONE;
+}
+
+/* the prompts move down with the last row */
+static void pause_campaign_shift_prompts(struct ui_widget_definition *widget, short shift)
+{
+	struct ui_widget_child_reference *children = widget->child_widgets.address;
+	long child;
+
+	for (child = 0; child < widget->child_widgets.count; child++)
+	{
+		if (children[child].widget_tag.index == NONE)
+			continue;
+		if (tag_name_ends(children[child].widget_tag.index, "\\button_key_sm") ||
+			tag_name_ends(children[child].widget_tag.index, "\\button_key"))
+		{
+			children[child].vertical_offset = (short)(children[child].vertical_offset + shift);
+		}
+		else if (!pause_campaign_box_bitmap(children[child].widget_tag.index))
+		{
+			pause_campaign_shift_prompts(tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index), shift);
+		}
+	}
+}
+
+/* the box (the menu's, and the mission objectives' beside it) grows by the
+same amount, using the frame drawn for that height */
+static void pause_campaign_grow_box(struct ui_widget_definition *widget, short shift)
+{
+	struct ui_widget_child_reference *children;
+	long child;
+	boolean piece_here = FALSE;
+
+	if (!widget || shift <= 0 || widget->child_widgets.count <= 0)
+		return;
+	children = widget->child_widgets.address;
+	for (child = 0; child < widget->child_widgets.count; child++)
+	{
+		struct ui_widget_definition *child_widget;
+		char const *piece_bitmap;
+
+		if (children[child].widget_tag.index == NONE)
+			continue;
+		child_widget = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
+		piece_bitmap = pause_campaign_box_bitmap(children[child].widget_tag.index);
+		if (!piece_bitmap)
+		{
+			pause_campaign_grow_box(child_widget, shift);
+			continue;
+		}
+		piece_here = TRUE;
+		{
+			/* (bitmap_name is the lookup, not piece_bitmap: find calls it) */
+			long bitmap = find(piece_bitmap, build.menus->bitmap_count, bitmap_name);
+			short height = (short)(child_widget->bounds.y1 - child_widget->bounds.y0);
+			short frame = NONE, size;
+
+			for (size = 0; size < (short)NUMBEROF(pause_campaign_box_heights); size++)
+			{
+				if ((short)(height + shift) == pause_campaign_box_heights[size])
+					frame = (short)((strstr(piece_bitmap, "objectives_") ? 0 : PAUSE_CAMPAIGN_BOX_FRAME) + size);
+			}
+			if (bitmap != NONE && frame != NONE)
+			{
+				struct bitmap_group *group = bitmap_group_get(build.bitmap_tags[bitmap]);
+				struct bitmap_group_sequence *sequence = group ? group->sequences.address : NULL;
+
+				if (sequence && frame < group->bitmaps.count)
+				{
+					sequence->first_bitmap_index = frame;
+					sequence->bitmap_count = 1;
+					reference_set(&child_widget->background_bitmap, BITMAP_GROUP_TAG, build.bitmap_tags[bitmap]);
+					child_widget->bounds.y1 = (short)(child_widget->bounds.y0 + height + shift);
+				}
+			}
+			else
+			{
+				child_widget->bounds.y1 = (short)(child_widget->bounds.y1 + shift);
+			}
+		}
+	}
+	if (piece_here)
+		widget->bounds.y1 = (short)(widget->bounds.y1 + shift);
+}
+
+static boolean pause_settings_item_hidden(long tag_index)
+{
+	short index;
+
+	for (index = 0; index < (short)NUMBEROF(pause_settings_hidden_items); index++)
+	{
+		long widget = widget_named(pause_settings_hidden_items[index]);
+
+		/* (Network Setup stays in a co-op game, which is a network one or
+		has players beside this one: build.campaign is a game alone) */
+		if (!build.campaign && !strcmp(pause_settings_hidden_items[index], PAUSE_NETWORK_ITEM))
+			continue;
+		if (widget != NONE && build.widget_tags[widget] == tag_index)
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* in a game (a multiplayer map's pause menu, a campaign's in co-op),
+Network Setup opens its pages alone (PAUSE_NETWORK_SCREEN: map sharing, the
+multiplayer HUD and the text chat, streamer mode: tools/port_settings.py),
+not the rows that would drop the game (internet play) or are for the main
+menu (the router, the clipboard, the updates) */
+static void pause_network_patch(void)
+{
+	long item_widget = widget_named(PAUSE_NETWORK_ITEM);
+	long screen_widget = widget_named(PAUSE_NETWORK_SCREEN);
+	struct ui_widget_definition *item;
+	struct ui_widget_event_handler_reference *handlers;
+	long handler;
+
+	if (item_widget == NONE || screen_widget == NONE)
+		return;
+	item = tag_get(UI_WIDGET_DEFINITION_TAG, build.widget_tags[item_widget]);
+	handlers = item->event_handlers.address;
+	for (handler = 0; handler < item->event_handlers.count; handler++)
+	{
+		if (TEST_FLAG(handlers[handler].flags, _event_handler_open_widget_bit))
+			reference_set(&handlers[handler].widget_tag, UI_WIDGET_DEFINITION_TAG, build.widget_tags[screen_widget]);
+	}
+}
+
+/* the hidden items stay in the list, empty and taking no events (which it
+passes over), as an item's description is the one at its place in the list;
+the others move up into the first places */
+static void pause_settings_patch(void)
+{
+	long list_widget = widget_named(PAUSE_SETTINGS_LIST);
+	long ok_widget = widget_named(PAUSE_SETTINGS_GAMEPADS_OK);
+	long settings_save = function_index("port settings save", "pause", 0);
+	struct ui_widget_definition *list, *ok;
+	struct ui_widget_child_reference *children;
+	struct ui_widget_event_handler_reference *handlers;
+	short places[16];
+	long child, handler, place_count = 0, place = 0;
+
+	if (list_widget == NONE || ok_widget == NONE)
+		return;
+	list = tag_get(UI_WIDGET_DEFINITION_TAG, build.widget_tags[list_widget]);
+	children = list->child_widgets.address;
+	for (child = 0; child < list->child_widgets.count && place_count < (long)NUMBEROF(places); child++)
+	{
+		struct ui_widget_definition *item = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
+
+		if (item->type == _widget_type_text_box)
+			places[place_count++] = (short)(item->bounds.y0 + children[child].vertical_offset);
+	}
+	for (child = 0; child < list->child_widgets.count && place < place_count; child++)
+	{
+		struct ui_widget_definition *item = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
+
+		if (item->type != _widget_type_text_box)
+			continue;
+		if (pause_settings_item_hidden(children[child].widget_tag.index))
+		{
+			item->event_handlers.count = 0;
+			reference_clear(&item->background_bitmap, BITMAP_GROUP_TAG);
+			reference_clear(&item->text_label_string_list, UNICODE_STRING_LIST_TAG);
+			/* (nowhere for the mouse to focus it) */
+			item->bounds.y1 = item->bounds.y0;
+			item->bounds.x1 = item->bounds.x0;
+		}
+		else
+		{
+			children[child].vertical_offset = (short)(places[place++] - item->bounds.y0);
+		}
+	}
+	ok = tag_get(UI_WIDGET_DEFINITION_TAG, build.widget_tags[ok_widget]);
+	handlers = ok->event_handlers.address;
+	for (handler = 0; handler < ok->event_handlers.count; handler++)
+	{
+		if (handlers[handler].function == settings_save)
+			handlers[handler].function = (short)function_index("port profile settings save", "pause", 0);
+	}
+}
+
+static void pause_campaign_patch(struct cache_file_tag_instance *instances)
+{
+	long screen = tag_loaded(UI_WIDGET_DEFINITION_TAG, CAMPAIGN_PAUSE_SCREEN);
+	struct ui_widget_definition *definition;
+	struct ui_widget_child_reference *children;
+	long child;
+
+	if (screen == NONE)
+		return;
+	definition = tag_get(UI_WIDGET_DEFINITION_TAG, screen);
+	children = definition->child_widgets.address;
+	for (child = 0; child < definition->child_widgets.count; child++)
+	{
+		struct ui_widget_definition *list;
+		struct ui_widget_child_reference const *rows;
+		short span, top, grow, bottom;
+		long revert;
+
+		if (children[child].widget_tag.index == NONE)
+			continue;
+		list = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
+		if (list->type != _widget_type_column_list || list->child_widgets.count < 2)
+			continue;
+		rows = list->child_widgets.address;
+		/* (REVERT TO SAVED, by its tag: it opens its confirmation rather
+		than running a function, and a map's list need not have it second) */
+		for (revert = 0; revert < list->child_widgets.count; revert++)
+		{
+			if (tag_name_ends(rows[revert].widget_tag.index, "\\restart_at_save_point_button"))
+				break;
+		}
+		if (revert == list->child_widgets.count)
+			return;
+		span = (short)(rows[list->child_widgets.count - 1].vertical_offset - rows[0].vertical_offset);
+		top = rows[0].vertical_offset;
+		bottom = list->bounds.y1;
+		if (pause_list_patch(instances, list, revert, FALSE, &grow))
+		{
+			struct ui_widget_child_reference *placed = list->child_widgets.address;
+			struct ui_widget_definition const *button =
+				tag_get(UI_WIDGET_DEFINITION_TAG, placed[0].widget_tag.index);
+			short height = (short)(button->bounds.y1 - button->bounds.y0);
+			short prompts = pause_campaign_prompts(definition);
+			short count = (short)list->child_widgets.count;
+			short row, new_last, need = 0;
+
+			for (row = 0; row < count; row++)
+				placed[row].vertical_offset = (short)(top + row * PAUSE_CAMPAIGN_ROW_PITCH);
+			new_last = placed[count - 1].vertical_offset;
+			list->bounds.y1 = bottom;
+			if (list->bounds.y1 < (short)(new_last + height))
+				list->bounds.y1 = (short)(new_last + height);
+			/* keep the gap the last row had above the prompts, and grow the
+			box by the same amount */
+			if (prompts != NONE)
+			{
+				short old_bottom = (short)(children[child].vertical_offset + top + span + height);
+				short new_bottom = (short)(children[child].vertical_offset + new_last + height);
+				short clearance = (short)(prompts - old_bottom);
+
+				if (clearance < 0)
+					clearance = 0;
+				need = (short)(new_bottom + clearance - prompts);
+			}
+			if (need > 0)
+			{
+				pause_campaign_shift_prompts(definition, need);
+				pause_campaign_grow_box(definition, need);
+			}
+			pause_settings_patch();
+			platform_log("menus: the pause menu has SETTINGS%s", build.coop ? " and FRIENDLY FIRE" : "");
+		}
+		return;
+	}
+}
+
+/* The full-screen campaign pause menu also serves network co-op. Local
+split-screen keeps its separate layout. */
+static boolean full_screen_campaign_map(void)
+{
+	return tag_loaded('Soul', MULTIPLAYER_COLLECTION) == NONE &&
+		tag_loaded(UI_WIDGET_DEFINITION_TAG, CAMPAIGN_PAUSE_SCREEN) != NONE &&
+		(game_connection() != _game_connection_local || network_game_is_active() || !game_is_cooperative());
+}
+
+/* of those, a network game's: network co-op, whose pause menu gets FRIENDLY
+FIRE too */
+static boolean network_coop_campaign_map(void)
+{
+	return full_screen_campaign_map() && game_connection() != _game_connection_local && network_game_is_active();
+}
+
+/* whether display.menus asks for the PC version's menus: "pc" in any case
+(a value neither "pc" nor "xbox" is said once in the log, and is the Xbox's) */
+static boolean menus_pc_chosen(void)
+{
+	static boolean said;
+	char const *value = config_string("display.menus");
+
+	if (!csstrcasecmp(value, "pc"))
+		return TRUE;
+	if (csstrcasecmp(value, "xbox") && !said)
+	{
+		platform_log("menus: display.menus \"%s\" is not \"xbox\" or \"pc\": the Xbox's", value);
+		said = TRUE;
+	}
+	return FALSE;
+}
+
+/* whether the PC menus' text is the language of the maps' Custom Edition
+(display.menu_language), else English */
+static boolean menus_language_maps(void)
+{
+	static boolean said;
+	char const *value = config_string("display.menu_language");
+
+	if (!csstrcasecmp(value, "maps"))
+		return TRUE;
+	if (csstrcasecmp(value, "english") && !said)
+	{
+		platform_log("menus: display.menu_language \"%s\" is not \"maps\" or \"english\": English", value);
+		said = TRUE;
+	}
+	return FALSE;
+}
+
 void menu_tags_loaded(
 	char const *map_name)
 {
 	struct halo_menus const *menus;
 	struct cache_file_tag_instance *instances;
 	long widget_count, own_lists = 0, total, index;
+	boolean locale;
 
 	boolean game_map = strcmp(map_name, "ui") != 0;
+	boolean campaign = game_map && full_screen_campaign_map();
+	boolean coop = game_map && network_coop_campaign_map();
 
-	/* (ui.map, and a multiplayer map: its pause menu's SETTINGS) */
-	if ((game_map && tag_loaded('Soul', MULTIPLAYER_COLLECTION) == NONE) ||
-		strcmp(config_string("display.menus"), "pc"))
+	/* (ui.map, and a multiplayer map: its pause menu's SETTINGS; a
+	campaign's too, single player's or network co-op's, which also gets
+	FRIENDLY FIRE) */
+	if ((game_map && tag_loaded('Soul', MULTIPLAYER_COLLECTION) == NONE && !campaign) ||
+		!menus_pc_chosen())
 	{
 		return;
 	}
@@ -1719,6 +2204,10 @@ void menu_tags_loaded(
 	memset(&build, 0, sizeof(build));
 	build.menus = menus;
 	build.game_map = game_map;
+	/* Settings must not pause the simulation in a network campaign. */
+	build.campaign = campaign && game_connection() == _game_connection_local &&
+		!network_game_is_active() && !game_is_cooperative();
+	build.coop = coop;
 	widget_count = menus->widget_count;
 	build.widget_tags = malloc((widget_count + 1) * sizeof(long));
 	build.text_tags = malloc((widget_count + 1) * sizeof(long));
@@ -1758,12 +2247,24 @@ void menu_tags_loaded(
 		instance_set(instances, BITMAP_GROUP_TAG, build.bitmap_tags[index], menus->bitmaps[index].name, "",
 			bitmap_build(&menus->bitmaps[index], build.bitmap_tags[index]));
 	}
+	/* (the PC version's strings in the language of the Custom Edition the
+	maps come from, its loc.map's, unless English is chosen) */
+	locale = menus_language_maps() && custom_edition_locale_open();
 	for (index = 0; index < menus->string_list_count && !build.failed; index++)
 	{
 		struct halo_menu_strings const *list = &menus->string_lists[index];
+		struct custom_edition_string_list *map = locale && list->map ? custom_edition_locale_strings(list->map) : NULL;
 
 		instance_set(instances, UNICODE_STRING_LIST_TAG, build.strings_tags[index], list->name, "",
-			string_list_build(menus->strings + list->first, list->count));
+			string_list_build(menus->strings + list->first, menus->string_maps + list->first, list->count, map));
+		if (map)
+			free(map);
+	}
+	if (locale)
+	{
+		custom_edition_locale_close();
+		if (!game_map)
+			platform_log("menus: %ld strings from the Custom Edition's loc.map", build.map_strings);
 	}
 	for (index = 0; index < widget_count && !build.failed; index++)
 	{
@@ -1772,7 +2273,7 @@ void menu_tags_loaded(
 		if (widget->text)
 		{
 			instance_set(instances, UNICODE_STRING_LIST_TAG, build.text_tags[index], widget->name, " text",
-				string_list_build(&widget->text, 1));
+				string_list_build(&widget->text, NULL, 1, NULL));
 		}
 		if (widget->strings)
 		{
@@ -1780,7 +2281,7 @@ void menu_tags_loaded(
 			long count = spinner_split(widget, FALSE, pieces);
 
 			instance_set(instances, UNICODE_STRING_LIST_TAG, build.spinner_tags[index], widget->name, " strings",
-				string_list_build(pieces, count));
+				string_list_build(pieces, NULL, count, NULL));
 		}
 		instance_set(instances, UI_WIDGET_DEFINITION_TAG, build.widget_tags[index], widget->name, "", NULL);
 	}
@@ -1801,6 +2302,9 @@ void menu_tags_loaded(
 	if (game_map)
 	{
 		pause_patch(instances);
+		if (campaign)
+			pause_campaign_patch(instances);
+		pause_network_patch();
 		if (build.failed)
 			goto failed;
 		/* (those it made) */

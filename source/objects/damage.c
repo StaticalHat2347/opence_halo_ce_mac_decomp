@@ -103,6 +103,7 @@ symbols in this file:
 
 #include "cseries.h"
 #include "damage.h"
+#include "game_modes.h" /* port: port/linux/game/game_modes.c */
 #include "ai/ai.h"
 #include "cseries/errors.h"
 #include "effects/effects.h"
@@ -149,15 +150,20 @@ void network_damage_player_effect(long player_index, struct damage_data const *d
 void network_damage_aftermath(long object_index, struct damage_data const *damage, unsigned long being_damaged_flags,
 	real shield_damage, real body_damage, real body_damage_multiplier, short body_part, short node_index,
 	short region_index, short material_index, long victim_player_index);
+boolean network_damage_static_target(long object_index);
 
 /* set while a distributed client carries out a kill it does not decide (an
 act of god: the host's word, network_distributed.c, or the world's) */
 static boolean distributed_damage_authorized;
 
-/* whether this machine runs objects' shields (their stun, recharge and
+/* whether this machine runs the object's shields (their stun, recharge and
 overcharge): not a client of the distributed netcode, which has the host's
-(damage_set_network_state) */
-#define objects_update_shields() (!network_game_distributed_client())
+(damage_set_network_state), but for the map's scenery and devices that
+damage can break, whose damage every machine deals as the host did and of
+which the host sends no state (network_damage.c's static targets: a
+scenery's shield, broken, came back on no client) */
+#define objects_update_shields(object_index) \
+	(!network_game_distributed_client() || network_damage_static_target(object_index))
 
 /* ---------- constants */
 
@@ -1012,6 +1018,17 @@ static void object_damage_shield(
 	return;
 }
 
+/* port: damage from a player who is gone (an older checkpoint's, a grenade
+still flying) keeps its object and team, but not his handle, which a new
+player in his slot would get the credit of; after the network's admission
+of the damage (network_damage_deals), which needs the handle */
+static void damage_data_validate_owner(
+	struct damage_data *damage)
+{
+	if (damage->owner_player_index != NONE && !player_try_and_get(damage->owner_player_index))
+		damage->owner_player_index = NONE;
+}
+
 static void object_damage_aftermath(
 	long object_index,
 	struct damage_data *damage,
@@ -1026,6 +1043,9 @@ static void object_damage_aftermath(
 		object_definition_get(object->definition_index);
 	struct damage_effect_definition *damage_effect =
 		damage_effect_definition_get(damage->definition_index);
+
+	/* port: (a client's replay of the host's nonlethal damage too) */
+	damage_data_validate_owner(damage);
 
 	if (object_definition->object.acceleration_scale > _real_epsilon)
 	{
@@ -1103,11 +1123,14 @@ static void object_damage_aftermath(
 				being_damaged_flags,
 				_object_being_damaged_body_depleted_bit))
 		{
+			/* port: whether it is a melee's (Gun Game's demotion: game_modes.c) */
+			game_modes_kill_by_melee(damage_effect->damage.category == _damage_category_melee);
 			game_statistics_record_kill(
 				object_index,
 				damage->owner_player_index,
 				damage->owner_object_index,
 				damage->owner_team_index);
+			game_modes_kill_by_melee(FALSE);
 		}
 	}
 	else if (game_engine_can_score())
@@ -1216,7 +1239,14 @@ static void object_damage_body(
 	{
 		if (damage_amount > 0.f && TEST_FLAG(damage_material->flags, _damage_material_head_bit))
 		{
-			if (TEST_FLAG(damage_definition->flags, _damage_can_cause_headshots_bit))
+			/* port: SWAT's headshots, a shot of any weapon's (game_modes.c) */
+			if (TEST_FLAG(damage_definition->flags, _damage_can_cause_headshots_bit) ||
+				game_modes_headshot_kills(object_index,
+					damage_definition->category == _damage_category_bullet ||
+					damage_definition->category == _damage_category_sniper ||
+					damage_definition->category == _damage_category_plasma ||
+					damage_definition->category == _damage_category_needle ||
+					damage_definition->category == _damage_category_shotgun))
 			{
 				if (game_engine_running() ||
 					object->object.type != _object_type_biped ||
@@ -1435,6 +1465,9 @@ void object_cause_damage(
 	{
 		return;
 	}
+
+	/* port: a player who is gone is credited with nothing */
+	damage_data_validate_owner(damage);
 
 	damage_effect = damage_effect_definition_get(damage->definition_index);
 	damage_definition = &damage_effect->damage;
@@ -1756,7 +1789,12 @@ void object_cause_damage(
 					force_kill = TRUE;
 				}
 
+				/* port: nor does a teammate's hit kill outright (a melee from
+				behind, an instant kill) where the gametype's friendly fire
+				spares the body; a killing blow the host dealt (a client's
+				replay of it) is dealt as the host dealt it */
 				if (force_kill &&
+					(friendly_damage == _friendly_damage_all || distributed_damage_authorized) &&
 					!TEST_FLAG(current_object->object.damage_flags, _object_dead_bit))
 				{
 					current_object->object.body_vitality = 0.f;
@@ -2011,10 +2049,10 @@ void object_damage_update(
 				FLAG(_object_die_act_of_god_no_statistics_bit));
 	}
 
-	if (objects_update_shields())
+	if (objects_update_shields(object_index))
 		SET_FLAG(object->object.damage_flags, _object_shield_charging_bit, FALSE);
 	damage_flags = object->object.damage_flags;
-	if (objects_update_shields() &&
+	if (objects_update_shields(object_index) &&
 		object->object.maximum_shield_vitality > 0.f &&
 		!TEST_FLAG(damage_flags, _object_dead_bit))
 	{

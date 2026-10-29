@@ -92,6 +92,12 @@ struct ctf_variant
 	boolean flag_must_reset;
 	boolean flag_at_home_to_score;
 	long single_flag_time;
+	/* port: Kills Score (the editor's): a kill scores a point for the
+	killer's team, and a capture is worth points_per_capture (5 to 100, 25 by
+	default) in place of one; the score to win is in captures, each worth
+	that much. Off (0): the Xbox's capture the flag */
+	long points_per_capture;
+	long kills_score;
 };
 
 struct slayer_variant
@@ -104,6 +110,9 @@ struct slayer_variant
 struct king_variant
 {
 	boolean moving_hill;
+	/* port: Multi-Hill: this many hills in play at once (2 to 5), else one
+	(game_engine_king.c). Zero in January's gametypes, whose union keeps it */
+	byte multi_hill;
 };
 
 /* the balls of an oddball game */
@@ -192,8 +201,6 @@ enum
 	_loadout_weapon_plasma_pistol,
 	_loadout_weapon_plasma_rifle,
 	_loadout_weapon_needler,
-	_loadout_weapon_fuel_rod,
-	_loadout_weapon_flamethrower,
 	NUMBER_OF_LOADOUT_WEAPONS
 };
 
@@ -212,6 +219,27 @@ enum
 	them (PC), else its counts */
 	VARIANT_VEHICLE_SET_PC = 0xFE,
 	VARIANT_VEHICLE_SET_CUSTOM = 0xFF
+};
+
+/* port: OpenCE's gametypes (port/linux/game/game_modes.c): a mode's rules
+over its game engine's (Slayer's), and Hardcore's over any */
+enum
+{
+	_game_mode_none = 0,
+	_game_mode_swat,
+	_game_mode_infection,
+	_game_mode_gun_game,
+	NUMBER_OF_GAME_MODES
+};
+
+enum
+{
+	/* Gun Game's weapons: the strongest first, the weakest first, or in an
+	order the host draws for each game */
+	_gun_game_order_strongest_first = 0,
+	_gun_game_order_weakest_first,
+	_gun_game_order_random,
+	NUMBER_OF_GUN_GAME_ORDERS
 };
 
 /* (the starting equipment, generic or the map's, is the variant's own:
@@ -238,9 +266,35 @@ struct game_variant_options
 	/* no weapons spawn on the map (its grenades and powerups do): for
 	a loadout of none, melee only */
 	boolean no_map_weapons;
+	/* port: OpenCE's gametypes (game_modes.c): the mode (_game_mode_*), and
+	Hardcore's rules (no motion sensor, no aim assist, a kill restores the
+	killer's health and shields) */
+	byte mode;
+	boolean hardcore;
+	/* Infection: the zombies chosen at the start, their speed and their
+	skull's melee damage (percent), their respawn time and the countdown
+	before the first are chosen (seconds), and whether they have shields */
+	byte infection_initial_zombies;
+	byte infection_zombie_speed;
+	byte infection_skull_damage;
+	byte infection_respawn_time;
+	byte infection_countdown;
+	boolean infection_zombie_shields;
+	/* Gun Game: the weapons' order (_gun_game_order_*), and whether a melee
+	kill takes the victim back a weapon */
+	byte gun_game_order;
+	boolean gun_game_melee_demotes;
+	/* port: Teamplay Options' FORCE TEAM SPAWNS: a team game other than CTF
+	spawns its players as CTF does, only at the map's CTF starting locations
+	of their own team (game_engine_get_starting_location_rating). Taken from
+	reserved, which older builds zero and ignore: the host alone picks spawns */
+	boolean force_team_spawns;
+	byte reserved[5];
 };
 
-typedef char verify_game_variant_options_size[sizeof(struct game_variant_options) == 0x1C ? 1 : -1];
+typedef char verify_game_variant_options_size[sizeof(struct game_variant_options) == 0x2C ? 1 : -1];
+/* (builds before OpenCE's gametypes saved and sent only the first 0x1C bytes) */
+#define GAME_VARIANT_OPTIONS_V1_SIZE 0x1C
 
 struct game_engine
 {
@@ -371,6 +425,10 @@ void game_variant_options_default(
 	struct game_variant_options *options);
 void game_engine_playlist_initialize(
 	void);
+/* port: a loadout weapon's (_loadout_weapon_*) definition, NONE if the map
+has none */
+long game_engine_loadout_weapon_definition(
+	byte weapon);
 
 long game_globals_get_weapon(
 	struct game_globals *game_globals,
@@ -427,6 +485,8 @@ void get_postgame_hilite_colors(
 boolean game_engine_running(
 	void);
 boolean game_engine_showing_postgame(
+	void);
+boolean game_engine_in_play(
 	void);
 
 boolean game_engine_get_state_message(
@@ -617,6 +677,9 @@ boolean game_engine_should_end_game(
 
 void game_engine_clear_goal_position(
 	short goal_index);
+
+void game_engine_objective_weapon_deleted(
+	long weapon_index);
 
 long get_flag_definition_index(
 	void);

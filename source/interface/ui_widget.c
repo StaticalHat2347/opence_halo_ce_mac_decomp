@@ -679,6 +679,9 @@ struct widget_instance;
 #include "text/text_group.h"
 #include "text/unicode.h"
 #include "ui_widget.h"
+/* port: port/linux/game/menu_functions.c: a text's colour in place of its
+own (the server browser's pings) */
+boolean pc_menu_text_color(struct widget_instance *widget, real_argb_color *color);
 
 /* ---------- constants */
 
@@ -1367,6 +1370,14 @@ static boolean ui_widget_load_children_recursive(
 /* port: whether the tag is one of the menus' (port/linux/game/menu_tags.c) */
 boolean pc_menu_tag(
 	long tag_index);
+/* port: whether this machine has, or is adding, a second player: co-op,
+split screen, the lobby's (port/linux/game/menu_functions.c) */
+unsigned char pc_menu_split_players(
+	void);
+/* port: local_player_count, 0 before the players' globals are made
+(source/game/players.c) */
+short players_port_local_player_count(
+	void);
 /* port: where in its widget, and how large, the menus draw a frame of
 ui.map's that they scale (port/linux/game/menu_tags.c) */
 boolean pc_menu_frame_placement(
@@ -1375,6 +1386,11 @@ boolean pc_menu_frame_placement(
 	short *y,
 	short *width,
 	short *height);
+/* port: the placeholder bitmap the menus draw a sprite of a high-res
+texture from, or the sheet if it has none (port/linux/game/hud_hires_tags.c) */
+struct bitmap_data const *hud_hires_sprite_bitmap(
+	struct bitmap_data const *sheet,
+	short sequence_index);
 static void widget_instance_initialize(
 	struct widget_instance *widget,
 	struct widget_instance *parent,
@@ -1434,8 +1450,40 @@ static void widget_instance_process_one_event_recursive(
 	boolean *return_widget_deleted);
 static boolean ui_check_for_pause_game(
 	void);
+static long spinner_string_list_extra_count(
+	long string_list_index);
+static wchar_t *spinner_string_list_get_string(
+	long string_list_index,
+	short string_index);
 
 /* ---------- globals */
+
+/* port: text boxes' string list indices from here are the descriptions of
+spinners' extra items (kills_to_win_extra_descriptions), above the Custom
+Edition maps' display indices (custom_edition_maps.c keeps them below 0x7000) */
+#define SPINNER_EXTRA_DESCRIPTION_BASE 0x7000
+/* ... and the pixels a spinner with extra items is wider (for three digits) */
+#define SPINNER_EXTRA_WIDTH 12
+
+/* port: the strings a spinner's string list has past the tag's own, as more
+items: the higher kills to win of the Slayer game type editor
+(ui_widget_event_handler_functions.c saves and loads them) */
+static wchar_t const *const kills_to_win_extra_strings[] =
+{
+	L"75", L"100", L"150", L"200", L"250", L"500",
+};
+
+/* ... their descriptions, as a text box's string list index of
+SPINNER_EXTRA_DESCRIPTION_BASE and up (ui_widget_spinner_extra_description) */
+static wchar_t const *const kills_to_win_extra_descriptions[] =
+{
+	L"Seventy-five kills to win. Settle in for a long\r\nfight.",
+	L"A hundred kills to win. Made for big games.",
+	L"A hundred and fifty kills to win. Only a crowded\r\nserver gets there.",
+	L"Two hundred kills to win. Bring friends. Lots of\r\nthem.",
+	L"Two hundred and fifty kills to win.",
+	L"Five hundred kills to win. You'll be here a while.",
+};
 
 /* port: an error message of the port's own text (display_error_text_deferred):
 the text waiting for its dialog, then the dialog's text box showing it */
@@ -2513,12 +2561,48 @@ static struct widget_instance *widget_instance_find_by_tag_index_recursive(
 	return result;
 }
 
+/* port: giving the focus clears focused_child all along the old focus's path,
+then links only the new focus's parents. Backing out of a screen does that: it
+loads the screen, focused on its first row, then focuses the row you left it
+from, so the first row is left with no focused child. A row that only passes
+events on (a setting's row and its spinner, a lobby row) then passes the d-pad,
+keys and buttons to nothing when it has the focus again, and only the mouse,
+which focuses the spinner itself, could change it. Such a row gets its first
+child that takes events back, as it had when its screen was loaded, whenever
+it takes the focus (here, and the d-pad's widget_instance_tab_to_*) */
+static void widget_instance_refocus_passthrough(
+	struct widget_instance *widget)
+{
+	struct widget_instance *child;
+	long flags;
+
+	if (!widget || widget->focused_child || widget_instance_can_handle_events(widget))
+		return;
+	flags = ui_widget_definition_get(widget->definition_tag_index)->flags;
+	if (!TEST_FLAG(flags, _widget_pass_unhandled_events_to_children_bit) ||
+		TEST_FLAG(flags, _widget_dont_focus_a_specific_child_bit))
+	{
+		return;
+	}
+	for (child = widget->child; child; child = child->next)
+	{
+		if (widget_instance_can_handle_events(child))
+		{
+			widget->focused_child = child;
+			break;
+		}
+	}
+
+	return;
+}
+
 static void widget_instance_give_focus_directly(
 	struct widget_instance *widget,
 	struct widget_instance *new_focus)
 {
 	struct widget_instance *focused_child =
 		widget_instance_get_topmost_parent(widget)->focused_child;
+	struct widget_instance *leaf;
 
 	if (new_focus->disabled == TRUE)
 	{
@@ -2548,6 +2632,7 @@ static void widget_instance_give_focus_directly(
 		if (substitute)
 			new_focus = substitute;
 	}
+	leaf = new_focus;
 	if (focused_child)
 	{
 		if (new_focus &&
@@ -2555,6 +2640,7 @@ static void widget_instance_give_focus_directly(
 			focused_child->parent)
 		{
 			new_focus->parent->focused_child = new_focus;
+			widget_instance_refocus_passthrough(leaf);
 
 			return;
 		}
@@ -2569,6 +2655,7 @@ static void widget_instance_give_focus_directly(
 		new_focus->parent->focused_child = new_focus;
 		new_focus = new_focus->parent;
 	}
+	widget_instance_refocus_passthrough(leaf);
 
 	return;
 }
@@ -3245,6 +3332,9 @@ static void event_handler_dispatch(
 	struct ui_widget_event_handler_reference *handler,
 	boolean *calling_widget_deleted)
 {
+	/* port: the widget's tag, named when its function fails (which may have
+	deleted the widget) */
+	long definition_tag_index = widget->definition_tag_index;
 	boolean widget_deleted = FALSE;
 	boolean success = TRUE;
 	boolean function_failed = FALSE;
@@ -3267,7 +3357,8 @@ static void event_handler_dispatch(
 			handler->function,
 			&widget_deleted))
 	{
-		error(_error_silent, "event handler function failed");
+		error(_error_silent, "event handler function %d of %s failed", handler->function,
+			tag_get_name(definition_tag_index));
 		function_failed = TRUE;
 	}
 	else
@@ -3343,7 +3434,11 @@ static void event_handler_dispatch(
 		{
 			close_all = TRUE;
 		}
+		/* port: not from a widget its function deleted (it went back:
+		menu_functions.c's profile_save_changes), which the Xbox's opened
+		from regardless */
 		if (TEST_FLAG(handler->flags, _event_handler_open_widget_bit) &&
+			!widget_deleted &&
 			handler->widget_tag.index != NONE)
 		{
 			if (!ui_widget_launch_widget(widget, handler->widget_tag.index))
@@ -3549,7 +3644,8 @@ static boolean ui_widget_load_children_recursive(
 		string_list = unicode_string_list_definition_get(definition->text_label_string_list.index);
 		widget_globals.dont_load_children_recursive = TRUE;
 		for (string_index = 0;
-			string_index < string_list->strings.count;
+			string_index < string_list->strings.count +
+				spinner_string_list_extra_count(definition->text_label_string_list.index);
 			string_index++)
 		{
 			struct widget_instance *child = ui_widget_load_by_name_or_tag(
@@ -3759,7 +3855,10 @@ static void widget_instance_initialize(
 	if (widget->pause_game_time == TRUE)
 	{
 		widget_globals.pause_game_time_count++;
-		if (!game_time_get_paused())
+		/* port: not at the main menu, where the clock only runs the menu's
+		scene, which stopped behind the screen and started again from its
+		beginning as it closed */
+		if (!game_time_get_paused() && !we_are_at_the_main_menu)
 			game_time_set_paused(TRUE);
 		if (!widget_globals.sound_paused && !we_are_at_the_main_menu)
 		{
@@ -4011,6 +4110,8 @@ static void render_state_bitmap(
 	if (bitmap && _texture_cache_bitmap_get_hardware_format(
 		(struct bitmap_data *)bitmap, FALSE, TRUE))
 	{
+		/* port: the sprite from a high-res texture, if it has one */
+		bitmap = hud_hires_sprite_bitmap(bitmap, icon->sequence_index);
 		scale = hud_globals_get_scale(local_player_count() > 1);
 		point.x = (short)(icon->offset.x * scale + cursor_bounds->x0 + 1.0f);
 		point.y = (short)(cursor_bounds->y1 - icon->offset.y * scale - 2.0f);
@@ -4518,7 +4619,8 @@ void display_error(
 							widget_globals.pause_game_time_count>=0,
 							"widget pause counter is out of whack");
 						widget_globals.pause_game_time_count++;
-						if (!game_time_get_paused())
+						/* port: not at the main menu (above) */
+						if (!game_time_get_paused() && !we_are_at_the_main_menu)
 							game_time_set_paused(TRUE);
 						if (!widget_globals.sound_paused && !we_are_at_the_main_menu)
 						{
@@ -4595,9 +4697,6 @@ void display_error_damaged_media(
 
 	return;
 }
-
-/* port: menu_tags.c's */
-char const *pc_menus_screen(char const *name);
 
 void network_game_reset_to_pregame_ui(
 	void)
@@ -5185,6 +5284,12 @@ static void widget_instance_render_text_box(
 		string = widget == ui_widget_port_error_text_box && ui_widget_port_error_text ?
 			(wchar_t *)ui_widget_port_error_text :
 			unicode_string_list_get_string(definition->text_label_string_list.index, string_list_index);
+		/* port: the description of a spinner's extra item */
+		if (string_list_index >= SPINNER_EXTRA_DESCRIPTION_BASE &&
+			string_list_index < SPINNER_EXTRA_DESCRIPTION_BASE + (short)NUMBEROF(kills_to_win_extra_descriptions))
+		{
+			string = (wchar_t *)kills_to_win_extra_descriptions[string_list_index - SPINNER_EXTRA_DESCRIPTION_BASE];
+		}
 		length = ustrlen(string);
 		widget->parameters.text_box.text = pool_resize_pointer(
 			widget_memory_pool,
@@ -5277,6 +5382,8 @@ static void widget_instance_render_text_box(
 			color_alpha = color.alpha;
 		}
 	}
+	/* port: a colour of the port's for the text (its alpha the box's) */
+	pc_menu_text_color(widget, &color);
 	color.alpha = alpha_modifier * color_alpha;
 	if (TEST_FLAG(definition->text_box_flags, _text_box_flashing_text_bit))
 	{
@@ -5373,6 +5480,13 @@ static void widget_instance_render_spinner_list(
 
 		csmemset(&parameters, 0, sizeof(parameters));
 		bounds = definition->list_header_bounds;
+		/* port: a spinner with extra items is wider, to the left, its arrow
+		with it */
+		if (spinner_string_list_extra_count(definition->text_label_string_list.index))
+		{
+			bounds.x0 -= SPINNER_EXTRA_WIDTH;
+			bounds.x1 -= SPINNER_EXTRA_WIDTH;
+		}
 		bounds.x0 += offset.x;
 		bounds.y0 += offset.y;
 		bounds.x1 += offset.x;
@@ -5417,7 +5531,7 @@ static void widget_instance_render_spinner_list(
 		if (definition->text_label_string_list.index != NONE)
 		{
 			short string_index = widget->parameters.list.selected_index;
-			wchar_t *string = unicode_string_list_get_string(
+			wchar_t *string = spinner_string_list_get_string(
 				definition->text_label_string_list.index,
 				string_index);
 			unsigned long length = ustrlen(string);
@@ -5492,6 +5606,13 @@ static void widget_instance_render_spinner_list(
 				bounds.y1 += offset.y;
 				bounds.x0 += offset.x;
 				bounds.y0 += offset.y;
+				/* port: a spinner with extra items (three digits) is wider, to the
+				left */
+				if (spinner_string_list_extra_count(definition->text_label_string_list.index))
+				{
+					bounds.x0 -= SPINNER_EXTRA_WIDTH;
+					clip.x0 -= SPINNER_EXTRA_WIDTH;
+				}
 				if (focus)
 				{
 					color.alpha = definition->text_color.alpha;
@@ -5566,7 +5687,12 @@ enum ui_mouse_target_kind
 	list steps to it, and a click then presses A */
 	_ui_mouse_target_list_slot,
 	/* a button's icon and label in a screen's key: a click presses it */
-	_ui_mouse_target_button
+	_ui_mouse_target_button,
+	/* the band of a list's slot rows left of its first slot (a list showing
+	several items): a click steps the list back by one */
+	_ui_mouse_target_list_back,
+	/* the band right of its last slot: a click steps it forward by one */
+	_ui_mouse_target_list_forward
 };
 
 struct ui_mouse_target
@@ -5575,11 +5701,30 @@ struct ui_mouse_target
 	rectangle2d bounds;
 	short kind;
 	short button_index;
+	/* where a value splits into previous / next: the middle of its box
+	before ui_mouse_widen_values widens it, so across the middle of the value
+	as drawn, where its arrows are, and up and down the middle of its row once
+	ui_mouse_merge_setting_rows has given it the row's height. A widened box
+	that a neighbour or the screen's edge holds to one side keeps it */
+	short split_x;
+	short split_y;
+	/* a button's parts, kept so its area can be settled once the whole frame's
+	buttons are known (ui_mouse_fit_button_targets) */
+	rectangle2d icon_bounds;
+	struct widget_instance *label;
+	rectangle2d label_bounds;
 };
 
 static struct ui_mouse_target ui_mouse_targets[UI_MOUSE_MAXIMUM_TARGETS];
 static long ui_mouse_target_count = 0;
 static boolean ui_mouse_noting_targets = FALSE;
+/* the frame's targets are noted and settled (ui_mouse_fit_button_targets,
+ui_mouse_merge_setting_rows, ui_mouse_widen_values) by one render only:
+render_ui_widgets runs once per player's viewport, and once more for a
+mirror (render.c), and a second render would note the same widgets again
+and widen the values once more, which moves their split off the arrows.
+Cleared with the targets, by ui_widgets_process_mouse */
+static boolean ui_mouse_targets_settled = FALSE;
 
 /* The presses the mouse makes, posted one a frame: the event queue keeps
 only the latest event posted between two frames (queue_event). What they
@@ -5591,8 +5736,160 @@ static short ui_mouse_presses[UI_MOUSE_MAXIMUM_PRESSES];
 static long ui_mouse_press_count = 0;
 static boolean ui_mouse_hover_pending = FALSE;
 static boolean ui_mouse_click_pending = FALSE;
+/* whether the pointer moved the focus last (the d-pad clears it): a list
+then doesn't scroll on at its end, which the pointer, moving, would make it
+do every frame (menu_functions.c) */
+static boolean ui_mouse_focused_last = FALSE;
+/* port: whether the pointer passing over a widget moved the focus last, not
+a click (or the d-pad): the server browser's game stays chosen
+(menu_functions.c) */
+static boolean ui_mouse_hovered_last = FALSE;
 static short ui_mouse_hover_x, ui_mouse_hover_y;
 static short ui_mouse_click_x, ui_mouse_click_y;
+/* whether the latest pointer read was the touchscreen: the taller legend
+areas, the merged setting rows and the widened values are for a finger only
+(render_ui_widgets); the desktop mouse keeps their original areas */
+static boolean ui_mouse_pointer_is_touch = FALSE;
+
+/* ---------- the debug view of the targets (debug.touch_targets)
+
+Drawn by render_ui_widgets in the pass that noted the targets: the list is
+only valid from the render that noted them to the next
+ui_widgets_process_mouse, which clears it. */
+
+#define UI_DEBUG_MARK_MILLISECONDS 3000
+#define UI_DEBUG_KEYBOARD_RECTANGLES 96
+
+struct ui_debug_mark
+{
+	boolean shown;
+	short x, y;
+	unsigned long time;
+};
+
+static struct ui_debug_mark ui_debug_down_mark, ui_debug_tap_mark;
+/* the frames ui_widgets_process_mouse has run, and the one the latest tap arrived in */
+static long ui_debug_frame, ui_debug_click_frame;
+
+void platform_log(char const *format, ...);
+int config_boolean(char const *name);
+
+/* whether debug.touch_targets is on; read once: settings do not change
+while the game runs */
+static boolean ui_debug_targets_enabled(
+	void)
+{
+	static long enabled = NONE;
+
+	if (enabled == NONE)
+		enabled = config_boolean("debug.touch_targets") != 0;
+
+	return enabled != 0;
+}
+
+/* outlines a rectangle, 2 menu pixels thick, in menu coordinates; the
+caller has the menus' centering offset on (render.c sets
+halo_screen_ui_offset(TRUE) around it; adding the offset inside would
+double it) */
+static void ui_debug_draw_outline(
+	rectangle2d const *bounds,
+	pixel32 color)
+{
+	rectangle2d edge;
+
+	edge = *bounds;
+	edge.y1 = edge.y0 + 2;
+	draw_quad(&edge, color);
+	edge = *bounds;
+	edge.y0 = edge.y1 - 2;
+	draw_quad(&edge, color);
+	edge = *bounds;
+	edge.x1 = edge.x0 + 2;
+	draw_quad(&edge, color);
+	edge = *bounds;
+	edge.x0 = edge.x1 - 2;
+	draw_quad(&edge, color);
+
+	return;
+}
+
+/* draws a cross of about 8 menu pixels at a mark that is still within its 3 seconds */
+static void ui_debug_draw_mark(
+	struct ui_debug_mark const *mark,
+	pixel32 color)
+{
+	rectangle2d arm;
+
+	if (!mark->shown ||
+		system_milliseconds() - mark->time > UI_DEBUG_MARK_MILLISECONDS)
+	{
+		return;
+	}
+	arm.x0 = mark->x - 4;
+	arm.x1 = mark->x + 4;
+	arm.y0 = mark->y - 1;
+	arm.y1 = mark->y + 1;
+	draw_quad(&arm, color);
+	arm.x0 = mark->x - 1;
+	arm.x1 = mark->x + 1;
+	arm.y0 = mark->y - 4;
+	arm.y1 = mark->y + 4;
+	draw_quad(&arm, color);
+
+	return;
+}
+
+/* outlines the targets the pointer code collected this frame and the last
+finger-down and tap points; only for the render that notes the targets
+(the first player's): a split-screen viewport that is not hit-tested shows
+nothing or it would show outlines that no tap uses */
+static void ui_debug_draw_targets(
+	boolean first_players_render)
+{
+	long index;
+
+	if (!first_players_render || !ui_debug_targets_enabled())
+		return;
+	if (virtual_keyboard_active())
+	{
+		rectangle2d rectangles[UI_DEBUG_KEYBOARD_RECTANGLES];
+		long count = virtual_keyboard_target_rectangles(rectangles, UI_DEBUG_KEYBOARD_RECTANGLES);
+
+		for (index = 0; index < count; index++)
+			ui_debug_draw_outline(&rectangles[index], 0xc0ffffff);
+	}
+	else
+	{
+		for (index = 0; index < ui_mouse_target_count; index++)
+		{
+			/* in the order of enum ui_mouse_target_kind; the band's two sides
+			share orange, which no other kind uses */
+			static pixel32 const colors[] = { 0xc000ff00, 0xc04080ff, 0xc0ffff00, 0xc0ff0000, 0xc0ff8000, 0xc0ff8000 };
+			short kind = ui_mouse_targets[index].kind;
+
+			ui_debug_draw_outline(&ui_mouse_targets[index].bounds, colors[PIN(kind, 0, 5)]);
+		}
+	}
+	ui_debug_draw_mark(&ui_debug_down_mark, 0xffff00ff);
+	ui_debug_draw_mark(&ui_debug_tap_mark, 0xff00ffff);
+
+	return;
+}
+
+/* remembers a finger-down or tap point for the debug view, to show it
+for 3 seconds */
+static void ui_debug_set_mark(
+	struct ui_debug_mark *mark,
+	short x,
+	short y)
+{
+	mark->shown = TRUE;
+	mark->x = x;
+	mark->y = y;
+	mark->time = system_milliseconds();
+
+	return;
+}
 
 static void ui_mouse_press(
 	short button_index)
@@ -5618,6 +5915,11 @@ static long ui_mouse_child_index(
 
 	return NONE;
 }
+
+static void ui_mouse_list_directions(
+	struct widget_instance *widget,
+	short *back,
+	short *forward);
 
 /* a list that shows several of its items at once */
 static boolean ui_mouse_list_shows_several(
@@ -5699,6 +6001,105 @@ static boolean ui_mouse_widget_is_item(
 		widget->type == _ui_widget_type_column_list;
 }
 
+/* notes a target that steps a list by one, unless it is empty or the
+targets are full */
+static void ui_mouse_note_list_step(
+	struct widget_instance *widget,
+	rectangle2d const *bounds,
+	short kind)
+{
+	struct ui_mouse_target *target;
+
+	if (ui_mouse_target_count >= UI_MOUSE_MAXIMUM_TARGETS ||
+		bounds->x0 >= bounds->x1 ||
+		bounds->y0 >= bounds->y1)
+	{
+		return;
+	}
+	target = &ui_mouse_targets[ui_mouse_target_count++];
+	target->widget = widget;
+	target->bounds = *bounds;
+	target->kind = kind;
+	target->button_index = NONE;
+	/* as ui_mouse_note_target sets them for any target that is not a
+	button: only a value's split and a button's parts are read, and no stale
+	field of an earlier frame's target stays in the slot */
+	target->split_x = (bounds->x0 + bounds->x1) / 2;
+	target->split_y = (bounds->y0 + bounds->y1) / 2;
+	target->icon_bounds = *bounds;
+	target->label = NULL;
+	target->label_bounds = *bounds;
+
+	return;
+}
+
+/* notes the band that steps a list showing several items side by side:
+left of the first slot (steps back), right of the last (steps forward). A
+stock several-items list covers the whole 640x480 screen, so a tap beside
+its slots cannot mean "step"; the band is limited to the slots' rows, and a
+tap on the title, between slots or under them does nothing. The caller notes
+nothing for the list itself, and widget_instance_render_recursive notes the
+slots after this; ui_mouse_target_at takes the last target noted under a
+point, so a slot would win over the band. A list the d-pad steps up and down
+has no side to tap and gets no band */
+static void ui_mouse_note_slot_band(
+	struct widget_instance *widget,
+	struct ui_widget_definition const *definition,
+	point2d offset)
+{
+	struct widget_instance *child;
+	rectangle2d bounds;
+	rectangle2d slots;
+	short back, forward;
+	boolean found = FALSE;
+
+	ui_mouse_list_directions(widget, &back, &forward);
+	if (back != _widget_event_dpad_left)
+		return;
+	for (child = widget->child; child; child = child->next)
+	{
+		rectangle2d slot;
+
+		if (!child->visible)
+			continue;
+		/* where widget_instance_render_recursive draws the child: the
+		list's offset plus the child's own */
+		slot = ui_widget_definition_get(child->definition_tag_index)->bounds;
+		slot.x0 += offset.x + child->horizontal_offset;
+		slot.x1 += offset.x + child->horizontal_offset;
+		slot.y0 += offset.y + child->vertical_offset;
+		slot.y1 += offset.y + child->vertical_offset;
+		if (!found)
+		{
+			slots = slot;
+			found = TRUE;
+		}
+		else
+		{
+			slots.x0 = MIN(slots.x0, slot.x0);
+			slots.x1 = MAX(slots.x1, slot.x1);
+			slots.y0 = MIN(slots.y0, slot.y0);
+			slots.y1 = MAX(slots.y1, slot.y1);
+		}
+	}
+	if (!found)
+		return;
+	bounds.y0 = slots.y0;
+	bounds.y1 = slots.y1;
+	bounds.x0 = definition->bounds.x0 + offset.x;
+	bounds.x1 = slots.x0;
+	ui_mouse_note_list_step(widget, &bounds, _ui_mouse_target_list_back);
+	bounds.x0 = slots.x1;
+	bounds.x1 = definition->bounds.x1 + offset.x;
+	ui_mouse_note_list_step(widget, &bounds, _ui_mouse_target_list_forward);
+
+	return;
+}
+
+/* notes a widget as a tap target of this frame, if it is one: an item,
+a value, a list slot, or a legend button (kept in parts that
+ui_mouse_fit_button_targets settles into the tap area); a list showing
+several items notes the band beside its slots */
 static void ui_mouse_note_target(
 	struct widget_instance *widget,
 	struct ui_widget_definition const *definition,
@@ -5707,6 +6108,9 @@ static void ui_mouse_note_target(
 	struct widget_instance *parent = widget->parent;
 	struct ui_mouse_target *target;
 	rectangle2d bounds = definition->bounds;
+	rectangle2d icon_bounds = bounds;
+	rectangle2d target_label_bounds = bounds;
+	struct widget_instance *target_label = NULL;
 	short button_index;
 	short kind;
 
@@ -5725,7 +6129,8 @@ static void ui_mouse_note_target(
 	{
 		/* the icon and its label: the text beginning just right of it */
 		struct widget_instance *sibling;
-		rectangle2d label_bounds;
+		rectangle2d label_bounds = bounds;
+		struct widget_instance *label = NULL;
 		short best_distance = 17;
 
 		kind = _ui_mouse_target_button;
@@ -5749,14 +6154,12 @@ static void ui_mouse_note_target(
 			{
 				best_distance = distance;
 				label_bounds = sibling_bounds;
+				label = sibling;
 			}
 		}
-		if (best_distance < 17)
-		{
-			bounds.x1 = MAX(bounds.x1, label_bounds.x1);
-			bounds.y0 = MIN(bounds.y0, label_bounds.y0);
-			bounds.y1 = MAX(bounds.y1, label_bounds.y1);
-		}
+		icon_bounds = bounds;
+		target_label = best_distance < 17 ? label : NULL;
+		target_label_bounds = label_bounds;
 	}
 	else if (parent && ui_mouse_list_shows_several(parent))
 	{
@@ -5770,8 +6173,16 @@ static void ui_mouse_note_target(
 	}
 	else if (widget->type == _ui_widget_type_spinner_list)
 	{
-		/* a list showing several items is picked through them */
-		if (!parent || ui_mouse_list_shows_several(widget) || !widget_instance_can_receive_events(widget))
+		if (!widget_instance_can_receive_events(widget))
+			return;
+		/* a list showing several items is picked through them, and stepped
+		by the band beside them */
+		if (ui_mouse_list_shows_several(widget))
+		{
+			ui_mouse_note_slot_band(widget, definition, offset);
+			return;
+		}
+		if (!parent)
 			return;
 		kind = _ui_mouse_target_value;
 	}
@@ -5788,6 +6199,258 @@ static void ui_mouse_note_target(
 	target->bounds = bounds;
 	target->kind = kind;
 	target->button_index = button_index;
+	target->split_x = (bounds.x0 + bounds.x1) / 2;
+	target->split_y = (bounds.y0 + bounds.y1) / 2;
+	target->icon_bounds = icon_bounds;
+	target->label = target_label;
+	target->label_bounds = target_label_bounds;
+
+	return;
+}
+
+/* makes a setting row its value: an item whose only value child is a value
+stops being a target, and the value takes the row's height. A tap anywhere
+else on the row would press A, which on a setting screen is ACCEPT. The
+value keeps its width and left/right half rule. Only the value's parent is
+the row; an item holding several values (a panel, a list of spinners) is not
+a row and keeps its own area. Only exactly one value merges because growing
+several values to the item's height would pile up boxes of which only the
+last noted could be tapped. Runs after ui_mouse_fit_button_targets so the
+legends are fitted against the whole row: a legend growing up into a row's
+label area would press ACCEPT there */
+static void ui_mouse_merge_setting_rows(
+	void)
+{
+	long index;
+	long other;
+	long kept = 0;
+
+	for (index = 0; index < ui_mouse_target_count; index++)
+	{
+		struct ui_mouse_target *row = &ui_mouse_targets[index];
+		struct ui_mouse_target *only_value = NULL;
+		long value_count = 0;
+
+		if (row->kind != _ui_mouse_target_item)
+			continue;
+		for (other = 0; other < ui_mouse_target_count; other++)
+		{
+			struct ui_mouse_target *value = &ui_mouse_targets[other];
+
+			if (value->kind == _ui_mouse_target_value && value->widget->parent == row->widget)
+			{
+				only_value = value;
+				value_count++;
+			}
+		}
+		if (value_count == 1)
+		{
+			only_value->bounds.y0 = row->bounds.y0;
+			only_value->bounds.y1 = row->bounds.y1;
+			row->kind = NONE;
+		}
+	}
+	/* in place, in order: the last target noted wins an overlap */
+	for (index = 0; index < ui_mouse_target_count; index++)
+	{
+		if (ui_mouse_targets[index].kind != NONE)
+			ui_mouse_targets[kept++] = ui_mouse_targets[index];
+	}
+	ui_mouse_target_count = kept;
+
+	return;
+}
+
+/* doubles the width of each value (a setting) around its centre: its arrows
+are small for a finger. Each half grows outward by half the box's width.
+The noted[] snapshot holds the boxes as noted; every measure is against them,
+not as already widened, so two neighbours never take each other's room
+whatever the order they were noted in. A box is not held to its row (the
+last arrow of a row sits near the row's end) but stops at the edge of a
+non-button target beside it that it overlaps vertically, at the midpoint of
+the gap to another value facing it, and at the menu's drawable area. A box
+never shrinks. Where a limit holds one side back, the split between previous
+and next stays at the original centre where the arrows are. Runs after
+ui_mouse_merge_setting_rows, once the rows have gone, and once a frame */
+static void ui_mouse_widen_values(
+	void)
+{
+	rectangle2d noted[UI_MOUSE_MAXIMUM_TARGETS];
+	long index;
+	long other;
+	short screen_width = (short)halo_screen_width();
+
+	for (index = 0; index < ui_mouse_target_count; index++)
+		noted[index] = ui_mouse_targets[index].bounds;
+	for (index = 0; index < ui_mouse_target_count; index++)
+	{
+		struct ui_mouse_target *value = &ui_mouse_targets[index];
+		rectangle2d const *box = &noted[index];
+		short half = (short)((box->x1 - box->x0) / 2);
+		short left = (short)(box->x0 - half);
+		short right = (short)(box->x1 + half);
+
+		if (value->kind != _ui_mouse_target_value)
+			continue;
+		value->split_x = (box->x0 + box->x1) / 2;
+		value->split_y = (box->y0 + box->y1) / 2;
+		left = MAX(left, (short)(-(screen_width - 640) / 2));
+		right = MIN(right, (short)(640 + (screen_width - 640) / 2));
+		for (other = 0; other < ui_mouse_target_count; other++)
+		{
+			struct ui_mouse_target const *beside = &ui_mouse_targets[other];
+			rectangle2d const *beside_box = &noted[other];
+			boolean is_value = beside->kind == _ui_mouse_target_value;
+
+			if (other == index || beside->kind == _ui_mouse_target_button ||
+				beside_box->y0 >= box->y1 || beside_box->y1 <= box->y0)
+			{
+				continue;
+			}
+			if (beside_box->x1 <= box->x0)
+				left = MAX(left, is_value ? (short)((beside_box->x1 + box->x0) / 2) : beside_box->x1);
+			else if (beside_box->x0 >= box->x1)
+				right = MIN(right, is_value ? (short)((box->x1 + beside_box->x0) / 2) : beside_box->x0);
+		}
+		value->bounds.x0 = MIN(left, box->x0);
+		value->bounds.x1 = MAX(right, box->x1);
+	}
+
+	return;
+}
+
+/* the right edge of a legend label's text as the game draws it, or NONE
+when it cannot be measured (no text, no font, or icons in the string, which
+the measuring does not account for) */
+static short ui_mouse_label_text_right(
+	struct widget_instance *label,
+	rectangle2d const *label_bounds)
+{
+	struct ui_widget_definition *definition = ui_widget_definition_get(label->definition_tag_index);
+	wchar_t const *text = label->parameters.text_box.text;
+	real_argb_color color = { 1.0f, 1.0f, 1.0f, 1.0f };
+	rectangle2d bounds = *label_bounds;
+	rectangle2d text_bounds;
+	rectangle2d cursor_bounds;
+
+	if (!text || !*text || definition->text_font.index == NONE ||
+		definition->justification < 0 || definition->justification >= NUMBER_OF_TEXT_JUSTIFICATIONS ||
+		string_has_icons_to_draw(text))
+	{
+		return NONE;
+	}
+	/* as widget_instance_render_text_box places the text */
+	bounds.x0 += definition->horizontal_offset;
+	bounds.y0 += definition->vertical_offset;
+	/* this leaves the label's font, justification and a white colour as the
+	global draw mode. That is harmless: it runs at the end of the widget
+	render, where the menu's own text has already left a menu font there, and
+	the menu, HUD, cinematic and terminal draws set their font before they
+	draw; the debug texts that set only a colour or format find a menu font
+	either way */
+	draw_string_set_draw_mode(definition->text_font.index, NONE, definition->justification, 0, &color);
+	draw_unicode_string_compute_bounds(&bounds, text, &text_bounds, &cursor_bounds);
+
+	return text_bounds.x1 == SHORT_MIN ? NONE : text_bounds.x1;
+}
+
+/* settles the areas of the frame's legend buttons: each reaches its label's
+drawn text (the text box can be far wider), stops before the next legend's
+icon on its row, and for a touchscreen only grows up to 8 units upward (not
+past an item, value or list slot above it) and in the screen's bottom strip
+runs down to the screen's edge (not past an item, value or list slot below
+it); recomputed from the parts kept at noting, so running again changes nothing */
+static void ui_mouse_fit_button_targets(
+	void)
+{
+	long index;
+	long other;
+
+	for (index = 0; index < ui_mouse_target_count; index++)
+	{
+		struct ui_mouse_target *target = &ui_mouse_targets[index];
+		short text_right;
+
+		if (target->kind != _ui_mouse_target_button)
+			continue;
+		target->bounds = target->icon_bounds;
+		if (target->label)
+		{
+			target->bounds.x1 = MAX(target->bounds.x1, target->label_bounds.x1);
+			target->bounds.y0 = MIN(target->bounds.y0, target->label_bounds.y0);
+			target->bounds.y1 = MAX(target->bounds.y1, target->label_bounds.y1);
+			text_right = ui_mouse_label_text_right(target->label, &target->label_bounds);
+			if (text_right != NONE)
+			{
+				target->bounds.x1 = MAX(target->icon_bounds.x1, MIN(target->label_bounds.x1, text_right + 2));
+			}
+		}
+		target->bounds.x0 = target->icon_bounds.x0;
+	}
+	for (index = 0; index < ui_mouse_target_count; index++)
+	{
+		struct ui_mouse_target *target = &ui_mouse_targets[index];
+
+		if (target->kind != _ui_mouse_target_button)
+			continue;
+		for (other = 0; other < ui_mouse_target_count; other++)
+		{
+			struct ui_mouse_target const *next = &ui_mouse_targets[other];
+
+			if (other != index && next->kind == _ui_mouse_target_button &&
+				next->icon_bounds.x0 > target->icon_bounds.x0 &&
+				next->bounds.y0 < target->bounds.y1 && next->bounds.y1 > target->bounds.y0 &&
+				next->icon_bounds.x0 - 1 < target->bounds.x1)
+			{
+				target->bounds.x1 = MAX(next->icon_bounds.x0 - 1, target->icon_bounds.x1);
+			}
+		}
+	}
+	for (index = 0; index < ui_mouse_target_count; index++)
+	{
+		struct ui_mouse_target *target = &ui_mouse_targets[index];
+		short top;
+
+		if (target->kind != _ui_mouse_target_button || !ui_mouse_pointer_is_touch)
+			continue;
+		if (target->bounds.y1 >= 400)
+		{
+			short bottom = 480;
+
+			/* running down to the screen's edge must not take the tap from an
+			item, value or list slot that a mod puts under the legend, as
+			growing upward must not above it: the legend is noted later, so it
+			would win the overlap */
+			for (other = 0; other < ui_mouse_target_count; other++)
+			{
+				struct ui_mouse_target const *below = &ui_mouse_targets[other];
+
+				if (below->kind != _ui_mouse_target_button &&
+					below->bounds.y0 >= target->bounds.y1 &&
+					below->bounds.x0 < target->bounds.x1 && below->bounds.x1 > target->bounds.x0)
+				{
+					bottom = MIN(bottom, below->bounds.y0);
+				}
+			}
+			target->bounds.y1 = bottom;
+		}
+		/* growing upward must not take the tap from an item, value or list
+		slot above the legend: those keep their areas, and the legend is noted
+		later, so it would win the overlap */
+		top = target->bounds.y0 - 8;
+		for (other = 0; other < ui_mouse_target_count; other++)
+		{
+			struct ui_mouse_target const *above = &ui_mouse_targets[other];
+
+			if (above->kind != _ui_mouse_target_button &&
+				above->bounds.y1 <= target->bounds.y0 &&
+				above->bounds.x0 < target->bounds.x1 && above->bounds.x1 > target->bounds.x0)
+			{
+				top = MAX(top, above->bounds.y1);
+			}
+		}
+		target->bounds.y0 = top;
+	}
 
 	return;
 }
@@ -5829,6 +6492,7 @@ static void ui_mouse_give_focus(
 {
 	struct widget_instance *ancestor;
 
+	ui_mouse_focused_last = TRUE;
 	if (ui_mouse_widget_has_focus(widget))
 		return;
 	widget_instance_give_focus_directly(widget_instance_get_topmost_parent(widget), widget);
@@ -5840,6 +6504,22 @@ static void ui_mouse_give_focus(
 	ui_play_audio_feedback_sound(_ui_audio_feedback_cursor);
 
 	return;
+}
+
+/* port: whether the pointer moved the menus' focus last, rather than the
+d-pad (menu_functions.c's lists) */
+boolean ui_widget_port_pointer_focused(
+	void)
+{
+	return ui_mouse_focused_last;
+}
+
+/* port: whether the pointer passing over a widget, not a click or the
+d-pad, moved the menus' focus last (menu_functions.c's server browser) */
+boolean ui_widget_port_hover_focused(
+	void)
+{
+	return ui_mouse_hovered_last;
 }
 
 /* the d-pad buttons that step a widget back and forward */
@@ -5888,9 +6568,13 @@ static void ui_mouse_step_list_to_slot(
 }
 
 /* the widget the wheel steps: the innermost on the focus's way that the
-d-pad steps through */
+d-pad steps through; a touch drag skips a list showing one value at a time
+(a setting), moving between the rows, so a drag never changes a value; that
+takes a tap on one of its halves; the desktop wheel keeps the game's own
+d-pad reach and steps a setting's value */
 static struct widget_instance *ui_mouse_wheel_widget(
-	struct widget_instance *root)
+	struct widget_instance *root,
+	boolean skip_settings)
 {
 	struct widget_instance *result = NULL;
 	struct widget_instance *widget;
@@ -5899,6 +6583,8 @@ static struct widget_instance *ui_mouse_wheel_widget(
 	{
 		struct ui_widget_definition *definition = ui_widget_definition_get(widget->definition_tag_index);
 
+		if (skip_settings && widget->type == _ui_widget_type_spinner_list && !ui_mouse_list_shows_several(widget))
+			continue;
 		if (definition->flags & (FLAG(_widget_dpad_updown_tabs_thru_children_bit) |
 			FLAG(_widget_dpad_leftright_tabs_thru_children_bit) |
 			FLAG(_widget_dpad_updown_tabs_thru_list_items_bit) |
@@ -5909,6 +6595,105 @@ static struct widget_instance *ui_mouse_wheel_widget(
 	}
 
 	return result;
+}
+
+/* whether the focus passes over a child of a list, which gives a press no
+place to land; the PC version's lists skip their labels and hidden rows
+(widget_instance_port_is_label) at both ends and wrap past them, so
+counting one would let a drag step past the last usable row */
+static boolean ui_mouse_wheel_skips_child(
+	struct widget_instance *list,
+	struct widget_instance *child)
+{
+	return list->type == _ui_widget_type_column_list && pc_menu_tag(list->definition_tag_index) &&
+		widget_instance_port_is_label(child);
+}
+
+/* how many presses of a d-pad button can step the focus before it would
+wrap around to the other end; the game's lists wrap, so a long touch drag
+would lap a short list: the drag stops at the ends; the press goes down from
+the screen to the first widget on the focus's way that tabs in its direction
+(widget_instance_process_one_event_recursive), and the ends are that
+widget's; 0 at the end or for a setting (changed by clicks only), NONE when
+no widget tabs that way */
+static long ui_mouse_wheel_room(
+	struct widget_instance *root,
+	short button,
+	boolean forward)
+{
+	boolean horizontal = button == _widget_event_dpad_left || button == _widget_event_dpad_right;
+	struct widget_instance *widget;
+
+	for (widget = root; widget; widget = widget->focused_child)
+	{
+		struct ui_widget_definition *definition = ui_widget_definition_get(widget->definition_tag_index);
+		boolean list = widget->type == _ui_widget_type_spinner_list || widget->type == _ui_widget_type_column_list;
+		struct widget_instance *child;
+		long room = 0;
+
+		if (TEST_FLAG(definition->flags, horizontal ?
+				_widget_dpad_leftright_tabs_thru_children_bit :
+				_widget_dpad_updown_tabs_thru_children_bit) &&
+			widget->focused_child)
+		{
+			/* a child the tab functions would skip gives no press a place to
+			land, so only the ones that take events, pass them on, or sit in
+			a list count */
+			for (child = forward ? widget->focused_child->next : widget->focused_child->previous;
+				child;
+				child = forward ? child->next : child->previous)
+			{
+				struct ui_widget_definition *child_definition = ui_widget_definition_get(child->definition_tag_index);
+
+				if ((child_definition->event_handlers.count > 0 ||
+					TEST_FLAG(child_definition->flags, _widget_pass_unhandled_events_to_children_bit) ||
+					list) &&
+					!ui_mouse_wheel_skips_child(widget, child))
+				{
+					room++;
+				}
+			}
+
+			return room;
+		}
+		if (list && TEST_FLAG(definition->flags, horizontal ?
+			_widget_dpad_leftright_tabs_thru_list_items_bit :
+			_widget_dpad_updown_tabs_thru_list_items_bit))
+		{
+			/* a setting is changed by clicks only */
+			if (widget->type == _ui_widget_type_spinner_list && !ui_mouse_list_shows_several(widget))
+				return 0;
+			if (widget->parameters.list.list_items && widget->parameters.list.number_of_items > 0)
+			{
+				room = forward ?
+					widget->parameters.list.number_of_items - 1 - widget->parameters.list.selected_index :
+					widget->parameters.list.selected_index;
+			}
+			else if (widget->focused_child)
+			{
+				/* a list of the tag's children, which the focus walks; the
+				focus skips a disabled child to the next that takes events, or
+				wraps (widget_instance_give_focus_directly): the main menu ends
+				with its hidden "game demos" */
+				for (child = forward ? widget->focused_child->next : widget->focused_child->previous;
+					child;
+					child = forward ? child->next : child->previous)
+				{
+					if (!child->disabled && !ui_mouse_wheel_skips_child(widget, child))
+						room++;
+				}
+				if (forward && widget->parameters.list.number_of_items > 0)
+				{
+					room = MIN(room, widget->parameters.list.number_of_items - 1 -
+						widget->parameters.list.selected_index);
+				}
+			}
+
+			return MAX(room, 0);
+		}
+	}
+
+	return NONE;
 }
 
 /* the menu the mouse drives: the first player's, or everyone's */
@@ -5939,15 +6724,58 @@ static boolean ui_mouse_menus_active(
 	return virtual_keyboard_active() || ui_mouse_menu() != NULL || game_engine_showing_postgame();
 }
 
-/* the pointer's motion, clicks and wheel since the last frame, as the first
-player's controller events */
 /* port: a row of a list to choose from (the PC version's menus' lists of
-gametypes, maps, profiles, levels and games: port/assets/menus) */
+gametypes, maps, profiles, levels and games, and the port's of mods:
+port/assets/menus) */
 static boolean ui_mouse_selection_row(
 	struct widget_instance *widget)
 {
 	return widget && widget->parent && pc_menu_tag(widget->parent->definition_tag_index) &&
-		(!strncmp(widget->name, "list_item_", 10) || !strncmp(widget->name, "server_item_", 12));
+		(!strncmp(widget->name, "list_item_", 10) || !strncmp(widget->name, "server_item_", 12) ||
+			!strncmp(widget->name, "op_mod_", 7));
+}
+
+/* logs a tap the menus resolved: where it was and the target the click acts
+on; a click waits for the presses the mouse queued, so it is resolved
+against the targets of a later frame than the one the tap arrived in; the
+frames between are logged so the target can be read against the screen that
+showed then; a value's line also gives the point where it splits into
+previous and next */
+static void ui_debug_log_click(
+	short x,
+	short y,
+	struct ui_mouse_target const *target,
+	long frames)
+{
+	/* in the order of enum ui_mouse_target_kind */
+	static char const *const kinds[] = { "item", "value", "list slot", "button", "list back", "list forward" };
+
+	if (target)
+	{
+		char const *kind = kinds[PIN(target->kind, 0, 5)];
+		char const *name = tag_get_name(target->widget->definition_tag_index);
+
+		/* a value steps by the side of its split the tap is on, and once
+		widened the split is not the middle of the logged box
+		(ui_mouse_widen_values) */
+		if (target->kind == _ui_mouse_target_value)
+		{
+			platform_log("touch targets: tap at %d,%d hit %s %s [%d,%d,%d,%d] split %d,%d after %ld frames", x, y,
+				kind, name, target->bounds.x0, target->bounds.y0, target->bounds.x1, target->bounds.y1,
+				target->split_x, target->split_y, frames);
+		}
+		else
+		{
+			platform_log("touch targets: tap at %d,%d hit %s %s [%d,%d,%d,%d] after %ld frames", x, y,
+				kind, name, target->bounds.x0, target->bounds.y0, target->bounds.x1, target->bounds.y1, frames);
+		}
+	}
+	else
+	{
+		platform_log("touch targets: tap at %d,%d hit none after %ld frames", x, y, frames);
+	}
+
+	return;
 }
 
 /* port: a press the menus post from their updates (menu_functions.c: the
@@ -5967,15 +6795,76 @@ void ui_widget_port_post_button(
 	return;
 }
 
+/* logs a tap while the virtual keyboard is up: the key or legend that took it */
+static void ui_debug_log_keyboard_tap(
+	short x,
+	short y,
+	long hit)
+{
+	rectangle2d rectangles[UI_DEBUG_KEYBOARD_RECTANGLES];
+	long count = virtual_keyboard_target_rectangles(rectangles, UI_DEBUG_KEYBOARD_RECTANGLES);
+
+	if (hit == NONE || hit >= count)
+	{
+		platform_log("touch targets: tap at %d,%d hit no keyboard key", x, y);
+	}
+	else
+	{
+		platform_log("touch targets: tap at %d,%d hit keyboard %s %ld [%d,%d,%d,%d]", x, y,
+			hit == count - 2 ? "BACK legend" : hit == count - 1 ? "ENTER legend" : "key",
+			hit, rectangles[hit].x0, rectangles[hit].y0, rectangles[hit].x1, rectangles[hit].y1);
+	}
+
+	return;
+}
+
+/* turns the pointer's motion, clicks and wheel since the last frame into the
+first player's controller events; while the virtual keyboard is up it gets
+the clicks and the menu behind gets nothing; a touch drag stops at the list's
+ends and skips settings; the desktop wheel wraps as the d-pad does; it
+records whether the pointer read is the touchscreen because the legends'
+taller tap areas are for a finger only; with debug.touch_targets on it also
+notes the finger-down and tap points for the debug view, and logs each tap: a
+menu click where it is resolved, a keyboard click where it is taken; a click
+on the band beside a list's slots steps the list by one; a PC list's row is
+selected by its first click and used by a click on the selected row; it
+forgets the frame's targets at the end, so that the next frame's render notes
+and settles them anew */
 static void ui_widgets_process_mouse(
 	void)
 {
 	struct halo_ui_pointer pointer;
 	struct ui_mouse_target *target;
 	short controller_index = 0;
+	boolean pointer_active;
+	boolean keyboard_active;
 
-	if (!halo_ui_pointer_update(ui_mouse_menus_active(), &pointer) ||
-		virtual_keyboard_active())
+	ui_debug_frame++;
+	pointer_active = halo_ui_pointer_update(ui_mouse_menus_active(), &pointer) != 0;
+	if (pointer_active)
+		ui_mouse_pointer_is_touch = pointer.touch != 0;
+	if (pointer_active && ui_debug_targets_enabled())
+	{
+		if (pointer.downs)
+			ui_debug_set_mark(&ui_debug_down_mark, pointer.down_x, pointer.down_y);
+		if (pointer.left_clicks)
+		{
+			ui_debug_set_mark(&ui_debug_tap_mark, pointer.click_x, pointer.click_y);
+			ui_debug_click_frame = ui_debug_frame;
+		}
+	}
+	/* the virtual keyboard takes the pointer's clicks itself; a click that
+	closes it (Done) is not also a click on the menu behind */
+	keyboard_active = virtual_keyboard_active();
+	if (pointer_active && keyboard_active && pointer.left_clicks)
+	{
+		long hit;
+
+		virtual_keyboard_click(pointer.click_x, pointer.click_y, &hit);
+		if (ui_debug_targets_enabled())
+			ui_debug_log_keyboard_tap(pointer.click_x, pointer.click_y, hit);
+	}
+	if (!pointer_active || keyboard_active)
 	{
 		ui_mouse_press_count = 0;
 		ui_mouse_hover_pending = FALSE;
@@ -5999,14 +6888,45 @@ static void ui_widgets_process_mouse(
 			ui_mouse_press(_widget_event_b_button);
 		if (pointer.wheel_steps && ui_mouse_menu())
 		{
-			struct widget_instance *widget = ui_mouse_wheel_widget(ui_mouse_menu());
-			short back = _widget_event_dpad_up, forward = _widget_event_dpad_down;
+			boolean touch = pointer.touch != 0;
+			struct widget_instance *widget = ui_mouse_wheel_widget(ui_mouse_menu(), touch);
+			boolean going_forward = pointer.wheel_steps < 0;
+			short back = _widget_event_dpad_up, forward = _widget_event_dpad_down, button;
+			long room = NONE;
+			long index;
 			long step;
 
 			if (widget)
 				ui_mouse_list_directions(widget, &back, &forward);
-			for (step = 0; step < ABS(pointer.wheel_steps) && step < 4; step++)
-				ui_mouse_press(pointer.wheel_steps > 0 ? back : forward);
+			/* a sideways PC widget (typically a screen's button bar) steps
+			sideways only, and the d-pad's up and down pass over it to a widget
+			above it on the focus's way, so a touch drag or the wheel leaves it
+			the same way (the wheel, past a list's last row onto the bar, went
+			back and forth between its buttons) */
+			if (widget && back == _widget_event_dpad_left && pc_menu_tag(widget->definition_tag_index) &&
+				ui_mouse_wheel_room(ui_mouse_menu(), _widget_event_dpad_up, FALSE) != NONE)
+			{
+				back = _widget_event_dpad_up;
+				forward = _widget_event_dpad_down;
+			}
+			button = going_forward ? forward : back;
+			/* only a touch drag stops at the ends, and does nothing with no list
+			to step; the desktop wheel wraps as the d-pad does, and falls back
+			to up and down */
+			if (touch)
+			{
+				room = widget ? ui_mouse_wheel_room(ui_mouse_menu(), button, going_forward) : 0;
+				/* the presses still waiting step the list first */
+				for (index = 0; widget && room != NONE && index < ui_mouse_press_count; index++)
+				{
+					if (ui_mouse_presses[index] == button)
+						room = MAX(room - 1, 0);
+					else if (ui_mouse_presses[index] == (going_forward ? back : forward))
+						room++;
+				}
+			}
+			for (step = 0; step < ABS(pointer.wheel_steps) && step < 4 && (room == NONE || step < room); step++)
+				ui_mouse_press(button);
 		}
 		if (!ui_mouse_press_count && ui_mouse_hover_pending)
 		{
@@ -6021,10 +6941,20 @@ static void ui_widgets_process_mouse(
 					/* (a selection list's row is chosen by a click, not
 					by passing over it on the way to its buttons) */
 					if (!ui_mouse_selection_row(target->widget))
+					{
 						ui_mouse_give_focus(target->widget);
+						/* port: (ui_mouse_hovered_last) */
+						ui_mouse_hovered_last = TRUE;
+					}
 					break;
 				case _ui_mouse_target_list_slot:
 					ui_mouse_step_list_to_slot(target->widget);
+					break;
+				/* stepping is a click's action: hovering a band does nothing, so
+				that passing a finger over a list's side never moves its focus or
+				its items */
+				case _ui_mouse_target_list_back:
+				case _ui_mouse_target_list_forward:
 					break;
 				}
 			}
@@ -6032,7 +6962,11 @@ static void ui_widgets_process_mouse(
 		if (!ui_mouse_press_count && ui_mouse_click_pending)
 		{
 			ui_mouse_click_pending = FALSE;
+			/* port: (ui_mouse_hovered_last) */
+			ui_mouse_hovered_last = FALSE;
 			target = ui_mouse_target_at(ui_mouse_click_x, ui_mouse_click_y);
+			if (ui_debug_targets_enabled())
+				ui_debug_log_click(ui_mouse_click_x, ui_mouse_click_y, target, ui_debug_frame - ui_debug_click_frame);
 			if (target)
 			{
 				switch (target->kind)
@@ -6057,8 +6991,8 @@ static void ui_widgets_process_mouse(
 					ui_mouse_give_focus(target->widget);
 					ui_mouse_list_directions(target->widget, &back, &forward);
 					first_half = back == _widget_event_dpad_left ?
-						ui_mouse_click_x < (target->bounds.x0 + target->bounds.x1) / 2 :
-						ui_mouse_click_y < (target->bounds.y0 + target->bounds.y1) / 2;
+						ui_mouse_click_x < target->split_x :
+						ui_mouse_click_y < target->split_y;
 					ui_mouse_press(first_half ? back : forward);
 					break;
 				}
@@ -6069,6 +7003,23 @@ static void ui_widgets_process_mouse(
 				case _ui_mouse_target_button:
 					ui_mouse_press(target->button_index);
 					break;
+				case _ui_mouse_target_list_back:
+				case _ui_mouse_target_list_forward:
+				{
+					short back, forward;
+
+					ui_mouse_give_focus(target->widget);
+					/* as ui_mouse_step_list_to_slot: a list with no focused item
+					(empty, or one the focus left, which cleared its focused_child)
+					has no item to step from, so the first tap on its band only
+					gives it the focus, and a d-pad press would move the focus off
+					the list instead */
+					if (!target->widget->focused_child)
+						break;
+					ui_mouse_list_directions(target->widget, &back, &forward);
+					ui_mouse_press(target->kind == _ui_mouse_target_list_back ? back : forward);
+					break;
+				}
 				}
 			}
 			else
@@ -6093,6 +7044,7 @@ static void ui_widgets_process_mouse(
 		}
 	}
 	ui_mouse_target_count = 0;
+	ui_mouse_targets_settled = FALSE;
 
 	return;
 }
@@ -6159,6 +7111,19 @@ static void widget_instance_render_recursive(
 			&bitmap_group->sequences,
 			0,
 			struct bitmap_group_sequence);
+		/* port: a widget whose bounds cover the whole 640x480 design space (the
+		 * pause menu's dim, for example) should cover the whole screen too,
+		 * not just the centered 640 columns -- same as the fade_to_black
+		 * quad in render_ui_widgets(). Both the bounds and the clip are
+		 * widened symmetrically below, before the centering offset is
+		 * added. Only flat fills (the dims, and the menus' vertical
+		 * gradient, at most 16 texels wide): a picture is drawn texel for
+		 * texel, so wider bounds would shift it (the loading screen). */
+		boolean widen_to_screen =
+			bounds.x0 <= 0 && bounds.y0 <= 0 &&
+			bounds.x1 >= 640 && bounds.y1 >= 480 &&
+			bitmap->width <= 16 &&
+			halo_screen_width() > 640;
 
 		if (use_nifty_plasma_fx)
 		{
@@ -6166,6 +7131,12 @@ static void widget_instance_render_recursive(
 			ui_plasma_effect_color.red = 0.05f;
 			ui_plasma_effect_color.green = 0.05f;
 			ui_plasma_effect_color.blue = 0.05f;
+		}
+		if (widen_to_screen)
+		{
+			long extra = (halo_screen_width() - 640) / 2;
+			bounds.x0 -= (short)extra;
+			bounds.x1 = (short)(640 + extra);
 		}
 		bounds.x0 += offset.x;
 		bounds.x1 += offset.x;
@@ -6179,6 +7150,17 @@ static void widget_instance_render_recursive(
 			clip->x1 += offset.x;
 			clip->y0 += offset.y;
 			clip->y1 += offset.y;
+		}
+		if (widen_to_screen && clip)
+		{
+			/* widen the clip by the same amount (it is offset-shifted but
+			 * still 640-wide at the edges) so the dim is not clipped back
+			 * to the centered columns */
+			long extra = (halo_screen_width() - 640) / 2;
+			if (clip->x0 <= 0)
+				clip->x0 -= (short)extra;
+			if (clip->x1 >= 640)
+				clip->x1 = (short)(clip->x1 + extra);
 		}
 		if (TEST_FLAG(definition->flags, _widget_flash_background_bitmap_bit))
 		{
@@ -6372,12 +7354,17 @@ void render_ui_widgets_postgame(
 	return;
 }
 
+/* renders the active widgets for one local player's viewport (or the whole
+screen), noting and settling the first player's tap targets in the frame's
+first render that can, and draws the debug view of the targets and the
+virtual keyboard when they are up */
 void render_ui_widgets(
 	short local_player_index,
 	rectangle2d const *window_bounds)
 {
 	rectangle2d bounds;
 	long widget_index;
+	boolean first_players_render = local_player_index == NONE || local_player_index == 0;
 
 	match_assert(
 		"c:\\halo\\SOURCE\\interface\\ui_widget.c",
@@ -6435,9 +7422,11 @@ void render_ui_widgets(
 				bounds.y1 = window_bounds->y1 - window_bounds->y0;
 				offset.x = 0;
 				offset.y = 0;
-				/* the mouse drives the first player's menus */
-				ui_mouse_noting_targets = widget->local_player_index == NONE ||
-					widget->local_player_index == 0;
+				/* the mouse drives the first player's menus; a widget shown in
+				every viewport (a dialog for everyone) is noted in the first
+				player's render only, and once a frame */
+				ui_mouse_noting_targets = first_players_render && !ui_mouse_targets_settled &&
+					(widget->local_player_index == NONE || widget->local_player_index == 0);
 				widget_instance_render_recursive(
 					widget_globals.active_widgets[widget_index],
 					&bounds,
@@ -6469,6 +7458,20 @@ void render_ui_widgets(
 				}
 			}
 		}
+		if (first_players_render && !ui_mouse_targets_settled)
+		{
+			/* fit the legends while the rows are still targets (merging
+			removes them); widen after merging (the merged values are
+			row-tall). A finger's targets only: the mouse clicks the
+			labels and values where CE's menus have them */
+			ui_mouse_fit_button_targets();
+			if (ui_mouse_pointer_is_touch)
+			{
+				ui_mouse_merge_setting_rows();
+				ui_mouse_widen_values();
+			}
+			ui_mouse_targets_settled = TRUE;
+		}
 		if (widget_globals.fade_to_black >= 0.0f &&
 			widget_globals.fade_to_black <= 1.0f)
 		{
@@ -6489,11 +7492,63 @@ void render_ui_widgets(
 	{
 		virtual_keyboard_render();
 	}
+	ui_debug_draw_targets(first_players_render);
 
 	return;
 }
 
 /* ---------- private code */
+
+
+static long spinner_string_list_extra_count(
+	long string_list_index)
+{
+	if (string_list_index != NONE && !csstrcmp(tag_get_name(string_list_index),
+		"ui\\shell\\main_menu\\settings_select\\multiplayer_setup\\playlist_edit\\slayer_edit\\var_kills_to_win"))
+	{
+		return NUMBEROF(kills_to_win_extra_strings);
+	}
+	return 0;
+}
+
+/* a spinner's items of its string list's own (the descriptions of a list of
+spinners count those: ui_widget_game_data_input_functions.c) */
+short ui_widget_spinner_own_item_count(
+	struct widget_instance *spinner)
+{
+	struct ui_widget_definition *definition = ui_widget_definition_get(spinner->definition_tag_index);
+
+	return (short)(spinner->parameters.list.number_of_items -
+		spinner_string_list_extra_count(definition->text_label_string_list.index));
+}
+
+/* the string list index of the description of a spinner's extra item, or
+NONE for an item of its own */
+short ui_widget_spinner_extra_description(
+	struct widget_instance *spinner,
+	short item_index)
+{
+	short own = ui_widget_spinner_own_item_count(spinner);
+
+	if (item_index < own)
+		return NONE;
+	return (short)(SPINNER_EXTRA_DESCRIPTION_BASE + item_index - own);
+}
+
+/* a string of a string list, or of its extra strings past the tag's own */
+static wchar_t *spinner_string_list_get_string(
+	long string_list_index,
+	short string_index)
+{
+	struct string_list *string_list = unicode_string_list_definition_get(string_list_index);
+
+	if (string_list && string_index >= string_list->strings.count &&
+		string_index - string_list->strings.count < spinner_string_list_extra_count(string_list_index))
+	{
+		return (wchar_t *)kills_to_win_extra_strings[string_index - string_list->strings.count];
+	}
+	return unicode_string_list_get_string(string_list_index, string_index);
+}
 
 static void widget_instance_render_column_list(
 	struct widget_instance *widget,
@@ -6614,6 +7669,8 @@ static void widget_instance_tab_to_next_valid_widget(
 				widget_instance_port_is_label(child)))
 		{
 			widget->focused_child = child;
+			/* port: (widget_instance_refocus_passthrough) */
+			widget_instance_refocus_passthrough(child);
 			break;
 		}
 		child = child->next;
@@ -6656,6 +7713,8 @@ static void widget_instance_tab_to_previous_valid_widget(
 				widget_instance_port_is_label(child)))
 		{
 			widget->focused_child = child;
+			/* port: (widget_instance_refocus_passthrough) */
+			widget_instance_refocus_passthrough(child);
 			break;
 		}
 		if (child->previous)
@@ -6667,6 +7726,59 @@ static void widget_instance_tab_to_previous_valid_widget(
 	return;
 }
 
+/* port: with one person playing, any controller drives the first player's
+menus, not only the first port's: a phone can list a device of its own (its
+touch controls) before the gamepad, which then reads port 2, and a player
+picks up whichever pad is at hand. Its screens read every controller's
+events (process_ui_widgets), and take them
+(widget_takes_events_of_controller). With two or more players, each
+controller keeps to its own player's menus */
+static boolean widget_takes_any_controller(
+	struct widget_instance const *widget)
+{
+	return widget->local_player_index == 0 && !pc_menu_split_players() &&
+		(we_are_at_the_main_menu || players_port_local_player_count() <= 1);
+}
+
+/* port: the controller whose events a screen reads (NONE: every one's) */
+static short widget_event_controller(
+	struct widget_instance const *widget)
+{
+	return widget_takes_any_controller(widget) ? NONE : widget->local_player_index;
+}
+
+/* port: whether a widget of the local player (NONE: any) takes the
+controller's events. In co-op's menus (Multiplayer's CO-OP CAMPAIGN,
+port/linux/game/menu_functions.c) the screens it shares with one player's
+campaign, New Game's levels and the difficulty, are player 1's (their rows
+the first controller's), and either player's controller uses them: player 1's
+is the one that chose co-op, player 2's the one that chose their profile */
+static boolean widget_takes_events_of_controller(
+	struct widget_instance const *widget,
+	short controller_index)
+{
+	short player;
+
+	if (widget->local_player_index == NONE || widget->local_player_index == controller_index)
+		return TRUE;
+	if (controller_index > 0 && controller_index < MAXIMUM_NUMBER_OF_LOCAL_PLAYERS &&
+		widget_takes_any_controller(widget))
+	{
+		return TRUE;
+	}
+	if (widget->local_player_index != 0 || !we_are_at_the_main_menu || player_spawn_count < 2 ||
+		controller_index < 0 || controller_index >= MAXIMUM_NUMBER_OF_LOCAL_PLAYERS)
+	{
+		return FALSE;
+	}
+	for (player = 0; player < 2; player++)
+	{
+		if (player_ui_get_single_player_local_player_controller(player) == controller_index)
+			return TRUE;
+	}
+	return FALSE;
+}
+
 static void widget_instance_process_one_event_recursive(
 	struct widget_instance *widget,
 	struct ui_widget_definition *definition,
@@ -6675,14 +7787,21 @@ static void widget_instance_process_one_event_recursive(
 {
 	boolean event_handled = FALSE;
 	boolean widget_deleted = FALSE;
-	boolean event_for_this_widget = widget->local_player_index == NONE ||
-		widget->local_player_index == event->controller_index;
+	boolean event_for_this_widget = widget_takes_events_of_controller(widget, event->controller_index);
 	long audio_feedback = _ui_audio_feedback_none;
 
 	match_assert(
 		"c:\\halo\\SOURCE\\interface\\ui_widget.c",
 		3067,
 		widget && definition && event && return_widget_deleted);
+	if (event->type == _event_type_button &&
+		event->data.button.index >= _widget_event_dpad_up &&
+		event->data.button.index <= _widget_event_dpad_right)
+	{
+		ui_mouse_focused_last = FALSE;
+		/* port: (ui_mouse_hovered_last) */
+		ui_mouse_hovered_last = FALSE;
+	}
 	if (event->type == _event_type_button &&
 		event->data.button.value > 1 &&
 		event->controller_index >= 0 &&
@@ -7103,8 +8222,7 @@ static void widget_instance_process_one_event_recursive(
 
 			for (child = widget->child; child; child = child->next)
 			{
-				if (child->local_player_index == NONE ||
-					child->local_player_index == event->controller_index)
+				if (widget_takes_events_of_controller(child, event->controller_index))
 				{
 					widget_instance_process_one_event_recursive(
 						child,
@@ -7118,8 +8236,7 @@ static void widget_instance_process_one_event_recursive(
 		}
 		else if (widget->focused_child)
 		{
-			if (widget->focused_child->local_player_index == NONE ||
-				widget->focused_child->local_player_index == event->controller_index)
+			if (widget_takes_events_of_controller(widget->focused_child, event->controller_index))
 			{
 				widget_instance_process_one_event_recursive(
 					widget->focused_child,
@@ -7532,7 +8649,7 @@ void process_ui_widgets(
 			struct event_record event = {0};
 
 			if (widget_globals.processing_inhibited ||
-				!get_next_event(&event, widget->local_player_index))
+				!get_next_event(&event, widget_event_controller(widget)))
 			{
 				/* the widget still gets one empty event so that its animation,
 				auto-close timer and fade keep running */
@@ -7563,7 +8680,7 @@ void process_ui_widgets(
 					if (widget != widget_globals.active_widgets[widget_index])
 						break;
 				}
-				while (get_next_event(&event, widget->local_player_index));
+				while (get_next_event(&event, widget_event_controller(widget)));
 			}
 			widgets_processed = TRUE;
 			if (!widget_globals.active_widgets[widget_index] &&

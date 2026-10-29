@@ -10,18 +10,27 @@ byte-for-byte identical to what the matching MSVC build compiles.
 #ifndef __HALO_LINUX_PREFIX_H
 #define __HALO_LINUX_PREFIX_H
 
-/* The Android and macOS ports run the game as an ILP32 guest (32-bit
-pointers in 64-bit code: arm64_32 on Android, x32 on macOS) inside a 64-bit
-host process, and draw with OpenGL ES (port/android/README.md,
-port/macos/README.md). HALO_ANDROID itself marks what only the Android app
-does. */
-#if defined(HALO_ANDROID) || defined(HALO_MACOS)
+/* Android and macOS run the game as an ILP32 guest inside a 64-bit host.
+HALO_GUEST also covers the macOS x32 guest. */
+#if defined(HALO_ARM64_GUEST) || defined(HALO_MACOS)
 #define HALO_GUEST 1
 #define HALO_GLES 1
 #endif
 
-#if !defined(__i386__) && !defined(HALO_GUEST)
+#if !defined(__i386__) && !defined(HALO_GUEST) && !defined(__wasm32__)
 #error the Linux port targets 32-bit x86: game data structures assume 32-bit pointers
+#endif
+
+/* ---------- WebAssembly: no return addresses
+
+WebAssembly code has no address to return to: Emscripten makes one up by
+walking a JavaScript stack trace, which the game's datum lookups (data.c's
+data_usable, for its report of a broken array) and the HUD's paired stack
+checks (hud_draw.c's get_return_eip) asked for thousands of times a frame:
+most of a frame's time. The address would name nothing a log could use
+anyway, so it is 0 there. */
+#ifdef __wasm32__
+#define __builtin_return_address(level) ((void *)0)
 #endif
 
 /* ---------- XDK architecture selection (MSVC predefines these) */

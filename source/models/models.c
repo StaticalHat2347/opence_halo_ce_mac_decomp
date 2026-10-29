@@ -83,6 +83,10 @@ symbols in this file:
 #include "shaders/shaders.h"
 #include "rasterizer/rasterizer_console_vars.h"
 #include "rasterizer/rasterizer_model_types.h"
+/* port: model tags and static enclosure recognition at map initialization. */
+#include "cache/cache_files.h"
+#include "rasterizer/rasterizer_transparent_geometry.h"
+#include "model_detail.h" /* port: port/linux/game/model_detail.c */
 
 /* ---------- constants */
 
@@ -236,6 +240,7 @@ static void render_model_parts(
 	struct render_skinning const *skinning,
 	long object_index,
 	short geometry_detail_level_index,
+	short detail_rules, /* port: model_detail_rules */
 	short forced_shader_permutation_index,
 	long flags);
 static void model_geometry_part_build_tangent_matrices(
@@ -270,6 +275,7 @@ static void render_model_parts(
 	struct render_skinning const *skinning,
 	long object_index,
 	short geometry_detail_level_index,
+	short detail_rules, /* port: model_detail_rules */
 	short forced_shader_permutation_index,
 	long flags)
 {
@@ -311,7 +317,9 @@ static void render_model_parts(
 					&region->permutations,
 					permutation_index,
 					struct model_region_permutation);
-				geometry_index = permutation->geometry_indices[geometry_detail_level_index];
+				/* port: the level display.model_detail chooses for the permutation
+				(port/linux/game/model_detail.c): stock, the model's */
+				geometry_index = model_detail_geometry_index(model, permutation, geometry_detail_level_index, detail_rules);
 				if (geometry_index!=NONE && !VALID_INDEX(geometry_index, model->geometries.count))
 				{
 					model_data_error(model, "geometry");
@@ -385,7 +393,10 @@ static void render_model_parts(
 									if (sort_filth_count<MAXIMUM_PARTS_PER_MODEL_GEOMETRY &&
 										sort_filth[sort_filth_count].group_index!=NONE &&
 										!immediate &&
-										(part->next_part_index>0 || part->previous_part_index>0))
+										/* port: part zero can head a link
+										(models_fix_transparent_part_links); no stock
+										model's part has a previous part of 0 */
+										(part->next_part_index>0 || part->previous_part_index>=0))
 									{
 										sort_filth[sort_filth_count].part_index = part_index;
 										sort_filth[sort_filth_count].next_part_index = part->next_part_index;
@@ -457,6 +468,89 @@ static void render_model_parts(
 }
 
 /* ---------- public code */
+
+/* port: a pickup's energy inside its two-sided glass shell is drawn before
+the shell with the engine's own part links (render_model_parts), as Halo CE
+Restored's tags link them, so that the centroid sort cannot put it after the
+glass; models with links of their own, skinned ones and those with other
+transparent parts are left as they are */
+static void model_geometry_fix_transparent_part_links(
+	struct model const *model, struct model_geometry *geometry)
+{
+	short i, glass = NONE, energy = NONE, transparent_count = 0;
+	struct model_geometry_part *parts = geometry->parts.address;
+
+	if (model->nodes.count != 1 || geometry->parts.count < 2 ||
+		geometry->parts.count > MAXIMUM_PARTS_PER_MODEL_GEOMETRY || !parts)
+	{
+		return;
+	}
+	for (i = 0; i < geometry->parts.count; ++i)
+	{
+		struct shader *shader;
+		struct model_shader_reference const *reference;
+
+		if (parts[i].flags || parts[i].previous_part_index != NONE || parts[i].next_part_index != NONE ||
+			!VALID_INDEX(parts[i].shader_index, model->shaders.count))
+		{
+			return;
+		}
+		reference = TAG_BLOCK_GET_ELEMENT(&model->shaders, parts[i].shader_index, struct model_shader_reference);
+		shader = shader_definition_get(reference->shader.index);
+		if (shader_type_is_transparent(shader->base.type))
+		{
+			++transparent_count;
+			if (shader->base.type == _shader_type_transparent_glass)
+			{
+				glass = i;
+			}
+			else if (shader->base.type == _shader_type_transparent_generic)
+			{
+				energy = i;
+			}
+		}
+	}
+	if (transparent_count == 2 && glass != NONE && energy != NONE &&
+		rasterizer_transparent_geometry_is_enclosure(
+			shader_definition_get(TAG_BLOCK_GET_ELEMENT(&model->shaders, parts[glass].shader_index, struct model_shader_reference)->shader.index),
+			&parts[glass].vertex_buffer, &parts[glass].triangle_buffer,
+			shader_definition_get(TAG_BLOCK_GET_ELEMENT(&model->shaders, parts[energy].shader_index, struct model_shader_reference)->shader.index),
+			&parts[energy].vertex_buffer))
+	{
+		/* (a link to part zero is none: with the glass part zero, the two
+		parts, which have no links of their own, change places) */
+		if (glass == 0)
+		{
+			struct model_geometry_part swap = parts[glass];
+			parts[glass] = parts[energy];
+			parts[energy] = swap;
+			glass = energy;
+			energy = 0;
+		}
+		parts[energy].next_part_index = (char)glass;
+		parts[glass].previous_part_index = (char)energy;
+	}
+}
+
+/* port: the links of every model the map loaded (at its start: the meshes
+do not change, and the next map's tags are loaded afresh) */
+void models_fix_transparent_part_links(void)
+{
+	struct tag_iterator iterator;
+	long index;
+
+	tag_iterator_new(&iterator, MODELS_GROUP_TAG);
+	while ((index = tag_iterator_next(&iterator)) != NONE)
+	{
+		struct model *model = model_definition_get(index);
+		long geometry;
+		for (geometry = 0; geometry < model->geometries.count; ++geometry)
+		{
+			model_geometry_fix_transparent_part_links(model,
+				TAG_BLOCK_GET_ELEMENT(&model->geometries, geometry, struct model_geometry));
+		}
+	}
+}
 
 void model_interpolate_node_orientations(
 	struct model const *model,
@@ -899,7 +993,11 @@ void render_model(
 		rasterizer_model_cortana_hack = FALSE;
 	}
 
-	if (level_of_detail_pixels>=model->detail_cutoff_pixels[0] || TEST_FLAG(flags, _render_model_shadow_bit))
+	/* port: the model measured as display.model_detail says
+	(halo_model_detail_scale, port/linux/src/d3d8_gl.c): stock, in the lines
+	of the 480-line screen */
+	if (level_of_detail_pixels*halo_model_detail_scale(FALSE)>=model->detail_cutoff_pixels[0] ||
+		TEST_FLAG(flags, _render_model_shadow_bit))
 	{
 		real_matrix4x3 relative_node_matrices[MAXIMUM_NODES_PER_MODEL];
 		struct rasterizer_model_begin_parameters model_parameters;
@@ -912,6 +1010,10 @@ void render_model(
 			MAXIMUM_REGIONS_PER_MODEL;
 		/* port: no more nodes than relative_node_matrices holds (a map's count) */
 		short node_count = (short)MIN(model->nodes.count, MAXIMUM_NODES_PER_MODEL);
+		/* port: the size the level of detail is chosen by (display.model_detail) */
+		real detail_level_pixels = level_of_detail_pixels*halo_model_detail_scale(TRUE);
+		/* port: how the permutations take that level (display.model_detail) */
+		short detail_rules;
 
 		if (!region_permutation_indices)
 		{
@@ -956,7 +1058,7 @@ void render_model(
 
 		geometry_detail_level_index = NUMBER_OF_DETAIL_LEVELS_PER_MODEL-1;
 		while (geometry_detail_level_index>0 &&
-			level_of_detail_pixels<model->detail_cutoff_pixels[geometry_detail_level_index])
+			detail_level_pixels<model->detail_cutoff_pixels[geometry_detail_level_index])
 		{
 			geometry_detail_level_index--;
 		}
@@ -968,6 +1070,8 @@ void render_model(
 			"c:\\halo\\SOURCE\\models\\models.c",
 			169,
 			geometry_detail_level_index>=0 && geometry_detail_level_index<NUMBER_OF_DETAIL_LEVELS_PER_MODEL);
+		/* port: stock, unless display.model_detail chose the level */
+		detail_rules = model_detail_rules(model, centroid, radius);
 
 		if (!TEST_FLAG(flags, _render_model_shadow_bit))
 		{
@@ -1066,7 +1170,8 @@ void render_model(
 							(actual_detail_level_index >= 0) && (actual_detail_level_index < NUMBER_OF_DETAIL_LEVELS_PER_MODEL));
 						maximum_actual_detail_level_index = MAX(maximum_actual_detail_level_index, actual_detail_level_index);
 
-						geometry_index = permutation->geometry_indices[geometry_detail_level_index];
+						/* port: the geometry render_model_parts draws */
+						geometry_index = model_detail_geometry_index(model, permutation, geometry_detail_level_index, detail_rules);
 						if (VALID_INDEX(geometry_index, model->geometries.count))
 						{
 							struct model_geometry *geometry = TAG_BLOCK_GET_ELEMENT(&model->geometries, geometry_index, struct model_geometry);
@@ -1176,6 +1281,7 @@ void render_model(
 			&model_parameters.skinning,
 			unique_identifier,
 			geometry_detail_level_index,
+			detail_rules,
 			forced_shader_permutation_index,
 			flags);
 		if (TEST_FLAG(flags, _render_model_shadow_bit))

@@ -109,6 +109,7 @@ symbols in this file:
 #include "text/draw_string.h"
 #include "coop_spectate.h" /* port: port/linux/game/coop_spectate.c */
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "network_chat.h" /* port: port/linux/game/network_chat.c */
 #include "text/font_group.h"
 #include "text/text_group.h"
 #include "units/unit_definitions.h"
@@ -1008,6 +1009,7 @@ allies' if it shows only friends (game_engine_draw_object_in_motion_sensor). */
 /* the platform layer's (port/linux/src/port_config.c) */
 const char *config_string(const char *name);
 double config_real(const char *name);
+int config_boolean(const char *name);
 unsigned long config_changes(void);
 /* port/linux/game/network_voice.c's: a player talking in voice chat (its
 machine), and its speaker drawn */
@@ -1098,46 +1100,11 @@ static boolean hud_player_name_in_sight(
 	return in_sight;
 }
 
-/* the farthest an enemy's name is shown, in world units (the sniper rifle's
-at 2x; its 8x would reach across most maps) */
-#define MAXIMUM_ENEMY_NAME_RANGE 70.0f
-
-/* how far away enemies' names are shown: as far as the local player's
-weapon turns its reticle red over an enemy (its autoaim distance, times its
-zoom; a vehicle's gun when seated at one, none for a weapon that aims only
-when zoomed, unzoomed), never less than the motion sensor's reach and never
-more than MAXIMUM_ENEMY_NAME_RANGE */
+/* how far away enemies' names are shown: the motion sensor's reach */
 static real hud_player_name_enemy_range(
 	void)
 {
-	long player_index = local_player_get_player_index(render.local_player_index);
-	real range = hud_globals ? hud_globals->defaults.motion_sensor_range : 0.0f;
-	long unit_index;
-
-	if (player_index == NONE || player_get(player_index)->unit_index == NONE)
-		return range;
-	unit_index = unit_get_aiming_unit_index(player_get(player_index)->unit_index);
-	if (unit_index != NONE)
-	{
-		struct unit_datum *unit = unit_get(unit_index);
-		long weapon_index = unit_inventory_get_weapon(unit_index, unit->unit.current_weapon_index);
-
-		if (weapon_index != NONE)
-		{
-			struct weapon_definition *definition = weapon_definition_get(weapon_get(weapon_index)->definition_index);
-			short zoom_level = player_control_get_zoom_level(render.local_player_index);
-
-			if (zoom_level != NONE || !TEST_FLAG(definition->weapon.flags, _weapon_aim_assists_only_when_zoomed_bit))
-			{
-				real weapon_range = definition->weapon.aim_assist_parameters.autoaim_distance *
-					weapon_get_zoom_magnification(weapon_index, zoom_level);
-
-				range = MAX(range, weapon_range);
-			}
-		}
-	}
-
-	return MIN(range, MAXIMUM_ENEMY_NAME_RANGE);
+	return hud_globals ? hud_globals->defaults.motion_sensor_range : 0.0f;
 }
 
 /* port: a player's name's colour above their head, an ally's (the HUD's
@@ -1273,6 +1240,8 @@ static void hud_draw_player_names(
 	/* the campaign always draws teammate triangles (hud_draw_players) */
 	indicators = game_engine_display_team_indicators() || !game_engine_running();
 	enemy_range = hud_player_name_enemy_range();
+	/* (the players the motion tracker would show this local player) */
+	game_engine_motion_sensor_viewer(render.local_player_index);
 	data_iterator_new(&iterator, player_data);
 	while ((player = data_iterator_next(&iterator)) != NULL)
 	{
@@ -1281,8 +1250,11 @@ static void hud_draw_player_names(
 
 		if (iterator.datum_index == player_index || player->unit_index == NONE)
 			continue;
-		if ((ally && setting == _player_names_enemies) || (!ally && setting == _player_names_allies))
+		if ((ally && setting == _player_names_enemies) || (!ally && setting == _player_names_allies) ||
+			!game_engine_draw_object_in_motion_sensor(player->unit_index))
+		{
 			continue;
+		}
 		hud_draw_player_name(iterator.datum_index, ally, ally && indicators, enemy_range);
 	}
 
@@ -1314,10 +1286,14 @@ static void temporary_hud_draw(
 	if (equipment_index != NONE)
 	{
 		struct object_datum *equipment = object_get(equipment_index);
-		sprintf(
+		/* port: snprintf, here and below, and the names' paths stripped as
+		the grenade's is (a map's tag's name may be any length, and need
+		not have a path) */
+		snprintf(
 			temporary,
+			sizeof(temporary),
 			"%s (press WHITE to use)|n",
-			strrchr(tag_get_name(equipment->definition_index), '\\') + 1);
+			tag_name_strip_path(tag_get_name(equipment->definition_index)));
 	}
 	else
 	{
@@ -1330,8 +1306,9 @@ static void temporary_hud_draw(
 			&scenario_get_game_globals()->grenades,
 			unit->unit.current_grenade_index,
 			struct game_globals_grenade);
-		sprintf(
+		snprintf(
 			temporary + csstrlen(temporary),
+			sizeof(temporary) - csstrlen(temporary),
 			"%d %s|n",
 			unit->unit.grenade_counts[unit->unit.current_grenade_index],
 			tag_name_strip_path(tag_get_name(grenade->projectile.index)));
@@ -1350,10 +1327,11 @@ static void temporary_hud_draw(
 					&weapon_definition->weapon.magazines,
 					0,
 					struct weapon_magazine_definition);
-			sprintf(
+			snprintf(
 				temporary + csstrlen(temporary),
+				sizeof(temporary) - csstrlen(temporary),
 				"%s|ntotal %d/%d|nloaded %d/%d|nheat %3.2f|nage %3.2f|n",
-				strrchr(tag_get_name(weapon->definition_index), '\\') + 1,
+				tag_name_strip_path(tag_get_name(weapon->definition_index)),
 				weapon->weapon.magazines[0].rounds_total,
 				magazine_definition->rounds_total_maximum,
 				weapon->weapon.magazines[0].rounds_loaded,
@@ -1363,14 +1341,16 @@ static void temporary_hud_draw(
 		}
 		else
 		{
-			sprintf(
+			snprintf(
 				temporary + csstrlen(temporary),
+				sizeof(temporary) - csstrlen(temporary),
 				"%s|n",
-				strrchr(tag_get_name(weapon->definition_index), '\\') + 1);
+				tag_name_strip_path(tag_get_name(weapon->definition_index)));
 		}
 
-		sprintf(
+		snprintf(
 			temporary + csstrlen(temporary),
+			sizeof(temporary) - csstrlen(temporary),
 			"%s%s",
 			(real)player->powerup_durations[_player_powerup_active_camouflage] > 0.0f
 				? "ACTIVE-CAMOUFLAGE "
@@ -1419,6 +1399,65 @@ static void temporary_hud_draw(
 	return;
 }
 
+/* port: the match clock (display.match_timer, off by default: Custom
+Edition's HUD has none), counting up from the game's
+first tick, which the items' respawn periods count from as well
+(game_engine_update_item_spawn's game_time_get() % respawn_period): an item
+is back on the map at every multiple of its period on the clock. */
+static boolean hud_match_timer_setting(
+	void)
+{
+	static boolean setting = FALSE;
+	static unsigned long read_at = (unsigned long)-1;
+
+	/* (read again when Settings changes it) */
+	if (read_at != config_changes())
+	{
+		read_at = config_changes();
+		setting = config_boolean("display.match_timer") != 0;
+	}
+
+	return setting;
+}
+
+static void hud_draw_match_timer(
+	void)
+{
+	long font_index = hud_get_font_index();
+	wchar_t time_string[32];
+	real_argb_color color;
+	rectangle2d bounds;
+	struct font_header *font;
+
+	if (!hud_match_timer_setting() || font_index == NONE)
+		return;
+	ticks_to_unicode_time_string(game_time_get(), NUMBEROF(time_string), time_string);
+	/* (a time under a minute is drawn with no minutes digit, which a clock
+	counting up from zero starts at: " :07") */
+	if (time_string[0] == L' ')
+		time_string[0] = L'0';
+	font = font_definition_get(font_index);
+	/* (the HUD's window, which a wide screen widens and a split screen
+	divides, in the view's coordinates; into the corner, where the first
+	person's weapon is not drawn) */
+	bounds.x1 = render.camera.window_bounds.x1 - render.camera.viewport_bounds.x0 - 5;
+	bounds.x0 = bounds.x1 - 320;
+	bounds.y1 = render.camera.window_bounds.y1 - render.camera.viewport_bounds.y0 - 14;
+	bounds.y0 = bounds.y1 - (font->ascending_height + font->descending_height);
+	hud_get_text_color(&color);
+	/* (lifted toward white, and whole: the HUD's own text colour is lost
+	against a map as bright as it) */
+	color.red += (1.0f - color.red) * 0.65f;
+	color.green += (1.0f - color.green) * 0.65f;
+	color.blue += (1.0f - color.blue) * 0.65f;
+	color.alpha = 1.0f;
+	/* (right justified: 1) */
+	draw_string_set_draw_mode(font_index, NONE, 1, 0, &color);
+	rasterizer_draw_unicode_string(&bounds, NULL, NULL, 0, time_string);
+
+	return;
+}
+
 void hud_draw_screen(
 	void)
 {
@@ -1445,6 +1484,13 @@ void hud_draw_screen(
 		/* port: the network co-op vote to skip a cinematic */
 		if (cinematic_in_progress())
 			coop_skip_vote_draw(render.local_player_index);
+
+		/* port: the match clock, in multiplayer */
+		if (game_engine_running() && !cinematic_in_progress() &&
+			hud_scripted_globals->show_hud)
+		{
+			hud_draw_match_timer();
+		}
 
 		if (!game_time_get_paused() &&
 			render.local_player_index == local_player_get_next(NONE))
@@ -1477,6 +1523,8 @@ void hud_draw_screen(
 		}
 
 		hud_messaging_update(render.local_player_index);
+		/* port: network games' text chat, the lines this view's player hears */
+		network_chat_draw(render.local_player_index);
 	}
 
 	rasterizer_hud_end();
