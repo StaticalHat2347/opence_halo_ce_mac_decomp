@@ -37,6 +37,9 @@ an administrator password, keeps the previous application as
 `/Applications/Halo.app.previous`, and leaves the player's game data and
 settings in `~/Library/Application Support/Halo` alone.
 
+From a source checkout, `deploy/macos/build_and_install_halo.sh` configures,
+builds and installs the native Apple-silicon application in one command.
+
 ### Sign and notarize the application
 
 To give `Halo.app` to other people, sign it with a Developer ID, and
