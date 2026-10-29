@@ -10,7 +10,7 @@ A dedicated server's publishing to the official master servers
 #include "server_master.h"
 #include "server_mode.h"
 
-#if HALO_SERVER_BUILD
+#if HALO_SERVER_BUILD && !defined(HALO_MACOS) /* port: macOS's guest HTTPS bridge currently serves browser reads */
 
 #include "p2p.h"
 #include "p2p_internal.h"

@@ -89,6 +89,7 @@ host_sdl_show_open_file_dialog
 host_sdl_file_dialog_result
 host_server_browser_fetch
 host_server_browser_result
+host_https_get
 
 # Dedicated-server services run in the host.
 posix_server_signals_install
@@ -108,4 +109,3 @@ posix_server_unix_seconds
 posix_server_unix_milliseconds
 posix_server_utc_text
 posix_server_local_text
-update_https_request
