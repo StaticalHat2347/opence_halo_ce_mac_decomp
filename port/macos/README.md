@@ -31,6 +31,12 @@ needs macOS 14.4 or later.
 3. Enter `ninja macos_app`.
 4. Open `build/macos/Halo.app`, or enter `open build/macos/Halo.app`.
 
+To install a built or released `Halo.app` in Applications, run
+`deploy/macos/install_halo_app.sh /path/to/Halo.app`. The installer asks for
+an administrator password, keeps the previous application as
+`/Applications/Halo.app.previous`, and leaves the player's game data and
+settings in `~/Library/Application Support/Halo` alone.
+
 ### Sign and notarize the application
 
 To give `Halo.app` to other people, sign it with a Developer ID, and
