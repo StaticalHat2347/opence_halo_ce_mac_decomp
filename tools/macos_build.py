@@ -247,7 +247,7 @@ def generate_macos_build(n: Writer, sln: Any) -> None:
     n.rule(name="macos_copy", command="mkdir -p $$(dirname $out) && cp $in $out", description="MACOS STAGE $out")
     n.rule(name="macos_thin", command="mkdir -p $$(dirname $out) && lipo $in -thin $arch -output $out",
            description="MACOS STAGE $out")
-    # the bundle's icon, from the Android app's artwork (port/android/art)
+    # the bundle's icon, from the shared OpenCE artwork (port/assets/icon)
     n.rule(name="macos_icon", command="mkdir -p $$(dirname $out) && $python tools/macos_icon.py $out",
            description="MACOS ICON $out")
     n.rule(
@@ -629,7 +629,7 @@ def _generate_variant(n: Writer, sln: Any, config: Dict[str, Any], variant: str,
         bundle_files.append(bundled_brokers)
         n.build(outputs=bundle / "Info.plist", rule="macos_copy", inputs=PORT_DIR / "Info.plist")
         n.build(outputs=bundle / "Resources" / "halo.icns", rule="macos_icon", inputs=PORT_DIR / "Info.plist",
-                implicit=[Path("port/android/art")])
+                implicit=[Path("tools/macos_icon.py"), Path("port/assets/icon/opence-icon.png")])
         if variant == "native":
             n.rule(name="macos_sign", command="codesign --force --deep --sign - $bundle > /dev/null 2>&1 && touch $out",
                    description="MACOS SIGN $bundle")
