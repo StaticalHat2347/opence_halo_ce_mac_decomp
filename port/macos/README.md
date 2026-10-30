@@ -16,10 +16,11 @@ needs macOS 14.4 or later.
 - Python 3.9 or later, and these packages: `pip3 install --user ninja cmake ziglang`.
   The `ziglang` package supplies `ld.lld` and `llvm-ar`, which link the
   game's image. An `ld.lld` and `llvm-ar` on the `PATH` operate too.
-- ANGLE, universal (x86_64 and arm64): `libEGL.dylib` and
-  `libGLESv2.dylib`. `configure.py` takes them from Steam's or Google
-  Chrome's Chromium Embedded Framework if one is installed. The option
-  `--macos-angle <folder>` selects a different folder.
+- ANGLE for Apple silicon: `libEGL.dylib` and `libGLESv2.dylib` with arm64
+  code. A universal pair (x86_64 and arm64) also enables the Intel build.
+  `configure.py` takes them from Steam's or Google Chrome's Chromium Embedded
+  Framework if one is installed. The option `--macos-angle <folder>` selects
+  a different folder.
 - A network connection for the first build. `configure.py` downloads musl
   1.2.5 (its SHA-256 is checked), SDL 3.4.16 (the release commit is
   checked) and the Khronos OpenGL ES headers to `build/macos/third_party`.

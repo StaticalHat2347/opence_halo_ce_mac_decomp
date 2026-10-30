@@ -18,6 +18,10 @@ int host_sdl_set_window_fullscreen_mode(unsigned int window, unsigned int displa
 int host_sdl_set_window_size(unsigned int window, int width, int height);
 int host_sdl_get_window_size(unsigned int window, int *width, int *height);
 void host_sdl_warp_mouse_in_window(unsigned int window, float x, float y);
+unsigned int host_sdl_get_keyboard_focus(void);
+int host_sdl_set_window_mouse_grab(unsigned int window, int grabbed);
+int host_sdl_show_cursor(void);
+int host_sdl_hide_cursor(void);
 unsigned int host_sdl_get_primary_display(void);
 unsigned int host_sdl_get_display_for_window(unsigned int window);
 int host_sdl_get_desktop_display_mode(unsigned int display, int *fields, float *reals);

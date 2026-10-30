@@ -1690,6 +1690,11 @@ void platform_mouse_capture(BOOL capture)
 	}
 	if (SDL_SetWindowRelativeMouseMode(platform_window, true))
 	{
+		/* port: SDL's relative mode does not reliably hide the pointer on
+		 * macOS.  The gameplay mouse must never leave it over the view. */
+		#ifdef HALO_MACOS
+		SDL_HideCursor();
+		#endif
 		if (mouse_warp_capture)
 		{
 			mouse_warp_capture = FALSE;
@@ -2316,7 +2321,8 @@ void platform_pump_events(void)
 				if (!first_quit || now - first_quit > 2000)
 				{
 					first_quit = now;
-					platform_show_message("Halo", "press Command-Q again to quit");
+					/* The game already presents this instruction in its own UI;
+					 * do not cover it with a macOS message box. */
 					break;
 				}
 			}

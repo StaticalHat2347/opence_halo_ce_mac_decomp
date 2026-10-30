@@ -33,7 +33,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .android_build import (GUEST_ABI_FLAGS as ANDROID_ABI_FLAGS, GUEST_CODE_FLAGS, MUSL_URL, MUSL_VERSION, SDL_TAG,
                             SDL_URL, VARIADIC_PROTOTYPE_FILES, EXPAT_DIR, KCP_DIR, MBEDTLS_DIR, TOML_DIR, _musl_sources,
@@ -104,10 +104,21 @@ X86_ABI_FLAGS = [
 
 
 def _find_tool(name: str) -> Optional[str]:
-    """ld.lld and llvm-ar: from PATH, else from the ziglang package"""
+    """ld.lld and llvm-ar: from PATH, Homebrew, else the ziglang package."""
     found = shutil.which(name)
     if found:
         return found
+    # Homebrew does not link LLVM's tools into PATH.  Older formulae package
+    # ELF LLD as `lld`, whose generic driver needs its GNU flavour selected.
+    for prefix in (Path("/opt/homebrew/opt/llvm"), Path("/opt/homebrew/opt/llvm@14"),
+                   Path("/usr/local/opt/llvm"), Path("/usr/local/opt/llvm@14")):
+        tool = prefix / "bin" / name
+        if tool.is_file():
+            return str(tool)
+        if name == "ld.lld":
+            tool = prefix / "bin" / "lld"
+            if tool.is_file():
+                return f"{_quote(tool)} -flavor gnu"
     try:
         import ziglang  # type: ignore
     except ImportError:
@@ -118,9 +129,8 @@ def _find_tool(name: str) -> Optional[str]:
     return f"{_quote(zig)} {'ld.lld' if name == 'ld.lld' else 'ar'}"
 
 
-def _find_angle(sln: Any) -> Optional[Path]:
-    """a folder holding libEGL.dylib and libGLESv2.dylib for both
-    architectures"""
+def _find_angle(sln: Any) -> Optional[Tuple[Path, Set[str]]]:
+    """a folder holding arm64 ANGLE, and x86_64 ANGLE where available."""
     wanted = getattr(sln, "macos_angle", None)
     candidates = [Path(wanted)] if wanted else []
     home = Path.home()
@@ -136,11 +146,15 @@ def _find_angle(sln: Any) -> Optional[Path]:
         if not gles.is_file() or not egl.is_file():
             continue
         try:
-            archs = subprocess.run(["lipo", "-archs", str(gles)], capture_output=True, text=True, check=True).stdout
+            gles_archs = set(subprocess.run(["lipo", "-archs", str(gles)], capture_output=True, text=True,
+                                             check=True).stdout.split())
+            egl_archs = set(subprocess.run(["lipo", "-archs", str(egl)], capture_output=True, text=True,
+                                            check=True).stdout.split())
         except (OSError, subprocess.CalledProcessError):
             continue
-        if {"x86_64", "arm64"} <= set(archs.split()):
-            return folder
+        archs = gles_archs & egl_archs
+        if "arm64" in archs:
+            return folder, archs
     return None
 
 
@@ -154,7 +168,12 @@ def _stage_angle(folder: Path, arch: str) -> Path:
         staged = target / name
         if staged.is_file() and staged.stat().st_mtime >= source.stat().st_mtime:
             continue
-        subprocess.run(["lipo", str(source), "-thin", arch, "-output", str(staged)], check=True)
+        source_archs = set(subprocess.run(["lipo", "-archs", str(source)], capture_output=True, text=True,
+                                          check=True).stdout.split())
+        if source_archs == {arch}:
+            shutil.copy2(source, staged)
+        else:
+            subprocess.run(["lipo", str(source), "-thin", arch, "-output", str(staged)], check=True)
     return target
 
 
@@ -214,13 +233,14 @@ def generate_macos_build(n: Writer, sln: Any) -> None:
     if not lld or not ar:
         n.comment("macOS build: no ld.lld/llvm-ar found (pip install ziglang)")
         return
-    angle = _find_angle(sln)
-    if not angle:
-        n.comment("macOS build: no universal ANGLE (libEGL.dylib, libGLESv2.dylib) found; pass --macos-angle")
+    angle_info = _find_angle(sln)
+    if not angle_info:
+        n.comment("macOS build: no arm64 ANGLE (libEGL.dylib, libGLESv2.dylib) found; pass --macos-angle")
         return
+    angle, angle_archs = angle_info
     try:
         fetch_third_party()
-        angles = {arch: _stage_angle(angle, arch) for arch in ("arm64", "x86_64")}
+        angles = {arch: _stage_angle(angle, arch) for arch in angle_archs & {"arm64", "x86_64"}}
     except (subprocess.CalledProcessError, OSError) as error:
         print(f"macOS build disabled: cannot fetch musl/SDL3/Khronos headers ({error})", file=sys.stderr)
         return
@@ -319,7 +339,8 @@ def generate_macos_build(n: Writer, sln: Any) -> None:
     # the same with the original's debug checks off (HALO_RELEASE), for
     # playing: build/macos-release/Halo.app (ninja macos_release_app)
     _generate_variant(n, sln, config, "release", angles["arm64"], libsdl)
-    _generate_variant(n, sln, config, "x86_64", angles["x86_64"], libsdl)
+    if "x86_64" in angles:
+        _generate_variant(n, sln, config, "x86_64", angles["x86_64"], libsdl)
     n.newline()
 
 

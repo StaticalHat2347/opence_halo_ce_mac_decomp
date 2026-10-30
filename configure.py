@@ -130,8 +130,8 @@ if not is_windows():
 parser.add_argument(
     "--macos-angle",
     metavar="FOLDER",
-    help="a folder holding a universal ANGLE (libEGL.dylib, libGLESv2.dylib) for `ninja macos` "
-    "(default: Steam's or Google Chrome's)",
+    help="a folder holding arm64 ANGLE (libEGL.dylib, libGLESv2.dylib) for `ninja macos`; "
+    "a universal pair also enables `ninja macos_x86_64` (default: Steam's or Google Chrome's)",
 )
 
 args = parser.parse_args()

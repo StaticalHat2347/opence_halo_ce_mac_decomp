@@ -629,24 +629,22 @@ const char *SDL_GetCurrentVideoDriver(void)
 
 SDL_Window *SDL_GetKeyboardFocus(void)
 {
-	return NULL;
+	return (SDL_Window *)host_sdl_get_keyboard_focus();
 }
 
 bool SDL_SetWindowMouseGrab(SDL_Window *window, bool grabbed)
 {
-	(void)window;
-	(void)grabbed;
-	return true;
+	return host_sdl_set_window_mouse_grab((unsigned int)window, grabbed) != 0;
 }
 
 bool SDL_ShowCursor(void)
 {
-	return true;
+	return host_sdl_show_cursor() != 0;
 }
 
 bool SDL_HideCursor(void)
 {
-	return true;
+	return host_sdl_hide_cursor() != 0;
 }
 
 SDL_PropertiesID SDL_CreateProperties(void)

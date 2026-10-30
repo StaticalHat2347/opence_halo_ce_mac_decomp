@@ -143,6 +143,28 @@ int host_sdl_set_relative_mouse(uint32_t window, int enabled)
 	return object ? SDL_SetWindowRelativeMouseMode(object, enabled != 0) : 0;
 }
 
+uint32_t host_sdl_get_keyboard_focus(void)
+{
+	return handle_new(_handle_window, SDL_GetKeyboardFocus());
+}
+
+int host_sdl_set_window_mouse_grab(uint32_t window, int grabbed)
+{
+	SDL_Window *object = handle_get(window, _handle_window);
+
+	return object ? SDL_SetWindowMouseGrab(object, grabbed != 0) : 0;
+}
+
+int host_sdl_show_cursor(void)
+{
+	return SDL_ShowCursor() ? 1 : 0;
+}
+
+int host_sdl_hide_cursor(void)
+{
+	return SDL_HideCursor() ? 1 : 0;
+}
+
 int host_sdl_gl_set_attribute(int attribute, int value)
 {
 	return SDL_GL_SetAttribute((SDL_GLAttr)attribute, value);
