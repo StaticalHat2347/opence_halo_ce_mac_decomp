@@ -22,6 +22,13 @@ callback is handed to a thread that has one.
 
 #define HANDLE_COUNT 256
 
+/* The Android guest runtime is shared with macOS. Its Android-only render
+policy is inactive here, so report the neutral, unknown family. */
+int host_android_chip_family(void)
+{
+	return 0;
+}
+
 enum handle_type
 {
 	_handle_free,
@@ -513,6 +520,11 @@ void host_sdl_audio_device_name(unsigned int device, char *buffer, unsigned int 
 int host_sdl_set_clipboard_text(const char *text)
 {
 	return SDL_SetClipboardText(text) ? 1 : 0;
+}
+
+int host_sdl_open_url(const char *url)
+{
+	return SDL_OpenURL(url) ? 1 : 0;
 }
 
 void host_sdl_get_clipboard_text(char *buffer, uint32_t size)

@@ -31,6 +31,7 @@ host_sdl_gl_swap_window
 host_sdl_poll_event
 host_sdl_set_clipboard_text
 host_sdl_get_clipboard_text
+host_sdl_open_url
 host_sdl_show_toast
 host_sdl_show_simple_message_box
 host_sdl_get_gamepads
@@ -58,6 +59,7 @@ host_gl_buffer_write
 host_gl_fence_frame
 host_gl_wait_frame
 host_android_path
+host_android_chip_family
 
 host_errno
 host_sdl_destroy_window
